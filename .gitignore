@@ -1,0 +1,11 @@
+*.mp4
+*.wav
+*.pt
+*.ass
+inbox/
+outbox/
+done/
+sfx/
+venv/
+__pycache__/
+yt-cookies.txt

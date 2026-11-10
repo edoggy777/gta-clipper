@@ -1,0 +1,9 @@
+torch
+transformers>=4.49
+qwen-vl-utils
+opencv-python-headless
+ultralytics
+faster-whisper
+soundfile
+numpy
+yt-dlp
