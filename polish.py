@@ -17,29 +17,53 @@ def loudness(path,hop=0.5):
     vals=[float(x) if x not in("-inf","inf","nan") else -90.0 for x in re.findall(r"RMS_level=(\S+)",out)]
     return np.array(vals),hop
 
+def steady(cx, cuts, fps, w):
+    """Calm camera: locked on short shots, slow follow with a dead zone on long ones, reset at cuts."""
+    n = len(cx); out = np.full(n, w / 2.0); idx = np.arange(n)
+    edges = [0] + [c for c in cuts if 0 < c < n] + [n]
+    dz = 0.12 * w; win = max(3, int(fps) | 1)
+    for a, b in zip(edges[:-1], edges[1:]):
+        seg = cx[a:b]; good = ~np.isnan(seg)
+        if not good.any(): continue
+        seg = np.interp(idx[a:b], idx[a:b][good], seg[good])
+        pad = np.pad(seg, win // 2, mode="edge")
+        tgt = np.median(np.lib.stride_tricks.sliding_window_view(pad, win), axis=1)   # ignore brief hops
+        tgt = np.convolve(np.pad(tgt, win // 2, mode="edge"), np.ones(win) / win, mode="valid")
+        if b - a < 2.5 * fps or tgt.max() - tgt.min() < 2 * dz:
+            out[a:b] = np.median(seg); continue                 # hold the camera still
+        cam = np.empty(b - a); c = float(np.median(tgt[:win]))
+        for k in range(b - a):
+            e = tgt[k] - c
+            if abs(e) > dz: c += (e - np.sign(e) * dz) * (2.0 / fps)   # ease toward the subject
+            cam[k] = c
+        h2 = max(3, (win // 2) | 1)
+        out[a:b] = np.convolve(np.pad(cam, h2 // 2, mode="edge"), np.ones(h2) / h2, mode="valid")
+    return out
+
 def track(path):
     from ultralytics import YOLO
     model=YOLO("yolov8n.pt")
-    cap=cv2.VideoCapture(path); fps=cap.get(5); n=int(cap.get(7)); w=int(cap.get(3)); h=int(cap.get(4))
-    cx=np.full(n,np.nan); prev=None
+    cap=cv2.VideoCapture(path); fps=cap.get(5) or 30; n=int(cap.get(7)); w=int(cap.get(3)); h=int(cap.get(4))
+    cx=np.full(n,np.nan); prev=None; ph=None; last=None; cuts=[]
     for i in range(n):
         ok,f=cap.read()
         if not ok: break
         if i%3: continue
         g=cv2.cvtColor(cv2.resize(f,(320,180)),cv2.COLOR_BGR2GRAY)
+        gh=cv2.calcHist([g],[0],None,[32],[0,256])
+        cut=prev is not None and cv2.absdiff(g,prev).mean()>25 and cv2.compareHist(gh,ph,cv2.HISTCMP_CORREL)<0.7
+        if cut: cuts.append(i); last=None                       # new shot: forget the old subject
         r=model.predict(f,imgsz=640,conf=0.3,verbose=False)[0]
         if len(r.boxes):
-            b=r.boxes.xyxy.cpu().numpy(); a=(b[:,2]-b[:,0])*(b[:,3]-b[:,1]); j=int(a.argmax()); cx[i]=(b[j,0]+b[j,2])/2
-        elif prev is not None:
+            b=r.boxes.xyxy.cpu().numpy(); a=(b[:,2]-b[:,0])*(b[:,3]-b[:,1]); c=(b[:,0]+b[:,2])/2
+            if last is not None: a=a/(1+((c-last)/(0.15*w))**2)  # stay on the same subject
+            j=int(a.argmax()); cx[i]=last=c[j]
+        elif prev is not None and not cut:
             m=cv2.moments(cv2.absdiff(g,prev))
             if m["m00"]>1e3: cx[i]=m["m10"]/m["m00"]*w/320
-        prev=g
+        prev=g; ph=gh
     cap.release()
-    idx=np.arange(n); good=~np.isnan(cx)
-    cx=np.interp(idx,idx[good],cx[good]) if good.any() else np.full(n,w/2)
-    sm=cx.copy()
-    for k in range(1,n): sm[k]=0.92*sm[k-1]+0.08*cx[k]
-    return sm,fps,w,h
+    return steady(cx,cuts,fps,w),fps,w,h
 
 def env(t):  # punch-in envelope around peak
     if t<-0.25 or t>1.4: return 0.0
@@ -100,11 +124,12 @@ if __name__=="__main__":
     ap.add_argument("--src",required=True); ap.add_argument("--start",type=float,required=True)
     ap.add_argument("--out",required=True); ap.add_argument("--len",type=float,default=30)
     ap.add_argument("--lead",type=float,default=8); ap.add_argument("--tail",type=float,default=14)
-    ap.add_argument("--hook",default=None); ap.add_argument("--handle",default="")
+    ap.add_argument("--peak",type=float,default=None); ap.add_argument("--hook",default=None); ap.add_argument("--no-hook",action="store_true"); ap.add_argument("--handle",default="")
     a=ap.parse_args(); tmp=Path(tempfile.mkdtemp())
     win=str(tmp/"win.mp4")
     run([FF,"-y","-ss",str(a.start),"-t",str(a.len),"-i",a.src,"-c:v","libx264","-preset","fast","-crf","18","-c:a","aac","-ar","48000",win])
-    curve,hop=loudness(win); peak=float(curve.argmax())*hop+hop/2
+    if a.peak is not None: peak=a.peak
+    else: curve,hop=loudness(win); peak=float(curve.argmax())*hop+hop/2
     s=max(0.0,peak-a.lead); e=min(a.len,peak+a.tail); dur=e-s
     cx,fps,w,h=track(win)
     render(win,cx,fps,w,h,s,e,peak,str(tmp/"vid.mp4"))
@@ -121,7 +146,8 @@ if __name__=="__main__":
     samples,_=sf.read(aud16,dtype="float32")
     segs,_=model.transcribe(samples,word_timestamps=True)
     words=[(x.word.strip(),x.start,x.end) for sg in segs for x in sg.words]
-    hook=a.hook or gen_hook(" ".join(w for w,_,_ in words))
+    hook="" if a.no_hook else (a.hook or gen_hook(" ".join(w for w,_,_ in words)))
     ass(words,hook,a.handle,dur,str(tmp/"cap.ass"))
-    run([FF,"-y","-i",str(tmp/"vid.mp4"),"-i",aud,"-vf",f"ass={tmp/'cap.ass'}","-c:v","libx264","-preset","slow","-crf","17","-pix_fmt","yuv420p","-c:a","aac","-b:a","192k","-shortest",a.out])
+    run([FF,"-y","-i",str(tmp/"vid.mp4"),"-i",aud,"-vf",f"ass={tmp/'cap.ass'},fade=t=in:st=0:d=0.4,fade=t=out:st={dur-0.5:.2f}:d=0.5",
+         "-af",f"afade=t=in:st=0:d=0.4,afade=t=out:st={dur-0.5:.2f}:d=0.5","-c:v","libx264","-preset","slow","-crf","17","-pix_fmt","yuv420p","-c:a","aac","-b:a","192k","-shortest",a.out])
     print("polished",a.out,"peak",round(peak,1),"hook",hook)

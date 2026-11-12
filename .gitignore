@@ -1,11 +1,9 @@
+*.pt
 *.mp4
 *.wav
-*.pt
-*.ass
+*.bak*
 inbox/
 outbox/
 done/
-sfx/
-venv/
+logo/
 __pycache__/
-yt-cookies.txt
