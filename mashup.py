@@ -175,6 +175,61 @@ def scatter_explosions(segs, length, n):
         free.remove(k)
 
 
+def scatter_act(segs, length, n, act, phase):
+    """n shots of this kind, spread evenly through the video, taken from chase slots first."""
+    free = [j for j in range(1, len(segs)) if segs[j]["act"] in ("chase", "rising")]
+    if len(free) < n:
+        free += [j for j in range(1, len(segs)) if segs[j]["act"] in ("cutscene", "falling")]
+    for i in range(n):
+        if not free:
+            break
+        target = (i + phase) / n * length
+        k = min(free, key=lambda j: abs((segs[j]["t0"] + segs[j]["t1"]) / 2 - target))
+        segs[k]["act"] = act
+        free.remove(k)
+
+
+def scatter_emotional(segs, length, n):
+    """n emotional shots, spread evenly, taken from the quiet slots first."""
+    free = [j for j in range(1, len(segs)) if segs[j]["act"] in ("cutscene", "falling", "rising")]
+    if len(free) < n:
+        free += [j for j in range(1, len(segs)) if segs[j]["act"] == "chase"]
+    for i in range(n):
+        if not free:
+            break
+        target = (i + 0.5) / n * length
+        k = min(free, key=lambda j: abs((segs[j]["t0"] + segs[j]["t1"]) / 2 - target))
+        segs[k]["act"] = "emotional"
+        free.remove(k)
+
+
+SKIP = []   # (video name, from second, to second) that must never be used
+
+
+def set_chases(segs, length, n):
+    """Exactly n chase shots, spread evenly through the video."""
+    mid = lambda j: (segs[j]["t0"] + segs[j]["t1"]) / 2
+    have = [j for j, s in enumerate(segs) if s["act"] == "chase"]
+    if len(have) > n:      # too many: keep n, the rest become build-up shots
+        pool, want, new = have, n, "rising"
+    else:                  # too few: take build-up slots first, then quiet ones
+        want, new = n - len(have), "chase"
+        pool = [j for j in range(1, len(segs)) if segs[j]["act"] == "rising"]
+        for quiet in ("cutscene", "falling"):
+            if len(pool) < want:
+                pool += [j for j in range(1, len(segs)) if segs[j]["act"] == quiet]
+    picked = []
+    for i in range(want):
+        if not pool:
+            break
+        target = (i + 0.5) / want * length
+        k = min(pool, key=lambda j: abs(mid(j) - target))
+        picked.append(k)
+        pool.remove(k)
+    for j in (pool if new == "rising" else picked):
+        segs[j]["act"] = new
+
+
 def prepare(video):
     """Returns (path to use, list of (t, score, label)). Converts AV1 etc. to H.264 once."""
     video = Path(video).resolve()
@@ -244,10 +299,13 @@ class Picker:
     """Hands out source moments for each act, never reusing the same footage."""
     ORDER = {  # act: list of (labels, sort high-to-low?) tried in turn
         "explosion": [({"explosion"}, True), ({"violence"}, True), ({"guns"}, True), ({"chase"}, True), (None, True)],
+        "guns": [({"guns"}, True), ({"violence"}, True), ({"guns"}, True), ({"chase"}, True), (None, True)],
+        "drugs": [({"drugs"}, True), ({"violence"}, True), ({"guns"}, True), ({"chase"}, True), (None, True)],
         "chase": [({"chase"}, True), ({"guns"}, True), ({"violence"}, True), (None, True)],
         "intro": [({"other"}, True), (None, False)],
         "rising": [({"chase"}, False), ({"guns"}, False), ({"other"}, True), (None, False)],
         "cutscene": [({"other"}, True), ({"chase"}, False), (None, False)],
+        "emotional": [({"emotional"}, True), ({"other"}, True), ({"chase"}, False), (None, False)],
         "falling": [({"other"}, True), (None, False)],
     }
 
@@ -266,6 +324,8 @@ class Picker:
             sys.exit("no scored frames in any input video")
 
     def free(self, path, s, d):
+        if any(Path(path).name == n and s < b and s + d > a for n, a, b in SKIP):
+            return False
         return all(s + d + 0.5 <= a or s >= b + 0.5 for a, b in self.used[path])
 
     def pick(self, act, d, frac):
@@ -348,9 +408,22 @@ def main():
     ap.add_argument("--wide", action="store_true")
     ap.add_argument("--logo", default=None)
     ap.add_argument("--explosions", type=int, default=None)
+    ap.add_argument("--sync", action="store_true")
+    ap.add_argument("--slow", type=float, default=0.75)
+    ap.add_argument("--chase", type=int, default=None)
+    ap.add_argument("--skip", action="append", default=[])
+    ap.add_argument("--emotional", type=int, default=None)
+    ap.add_argument("--guns", type=int, default=None)
+    ap.add_argument("--drugs", type=int, default=None)
     ap.add_argument("--speed", type=float, default=1.0)
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
+    for spec in a.skip:   # --skip name.mp4:40-50
+        name, _, rng = spec.rpartition(":")
+        t0, _, t1 = rng.partition("-")
+        if not name or not t1:
+            sys.exit(f"--skip should look like video.mp4:40-50, got: {spec}")
+        SKIP.append((name, float(t0), float(t1)))
     global FPS
     try:
         n, d = probe(a.videos[0], "stream=r_frame_rate", "v:0").split("/")
@@ -368,18 +441,33 @@ def main():
     assign_acts(segs, length)
     if a.explosions is not None:
         scatter_explosions(segs, length, a.explosions)
+    if a.emotional:
+        scatter_emotional(segs, length, a.emotional)
+    if a.guns:
+        scatter_act(segs, length, a.guns, "guns", 0.25)
+    if a.drugs:
+        scatter_act(segs, length, a.drugs, "drugs", 0.75)
+    if a.chase is not None:
+        set_chases(segs, length, a.chase)
     print("footage:")
     picker = Picker(a.videos)
+    names = {v.name for v in picker.used}
+    for n, _, _ in SKIP:
+        if n not in names:
+            sys.exit(f"--skip: no video called {n}; the names are: {', '.join(sorted(names))}")
 
     counts = {}
     for s in segs:
         counts[s["act"]] = counts.get(s["act"], 0) + 1
         f0, f1 = round(s["t0"] * FPS), round(s["t1"] * FPS)
         s["frames"] = f1 - f0
-        s["speed"] = a.speed if s["act"] in ("rising", "chase", "explosion") else 1.0
+        s["speed"] = a.speed if s["act"] in ("rising", "chase", "explosion", "guns") else 1.0
+        if a.sync:   # speed follows the music: quiet = slow motion, loud = fast
+            fast = a.speed if getattr(a, "speed", 1.0) > 1.0 else 1.5
+            s["speed"] = {"low": a.slow, "mid": 1.0}.get(s["level"], fast)
         s["src_d"] = s["frames"] / FPS * s["speed"]
     seen = {}
-    for act in ("explosion", "chase", "intro", "rising", "cutscene", "falling"):  # best footage first
+    for act in ("explosion", "emotional", "guns", "drugs", "chase", "intro", "rising", "cutscene", "falling"):  # best footage first
         for s in segs:
             if s["act"] == act:
                 frac = seen.get(act, 0) / counts[act]
