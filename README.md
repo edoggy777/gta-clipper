@@ -154,6 +154,7 @@ mv done/*.scores.txt old_scores/
 ## Requirements
 
 - Python 3 with NumPy
+- `eases.py`, `check.py` and `review.py` in the same folder as `mashup.py`
 - ffmpeg and ffprobe
 - A local vision model for `vlm_score.py`
 
@@ -183,7 +184,9 @@ model (slow, once per video); later runs reuse the saved scores.
 | `--wide` | 1920x1080 output (default is vertical 1080x1920) |
 | `--out FILE` | output file (default `~/clipper/outbox/mashup_<song>.mp4`) |
 | `--logo FILE.png` | logo that fades in and out at the start |
-| `--text "CAPTION"` | caption in the middle of the video |
+| `--text "CAPTION"` | caption in the middle of the video (rises into place and fades in) |
+| `--endcard FILE` | picture or short video shown after the last shot, song keeps playing |
+| `--endcard-seconds 2.5` | how long a picture end card stays up (a video uses its own length, 8 s at most) |
 
 ### What goes in the edit
 | Switch | What it does |
@@ -203,6 +206,7 @@ model (slow, once per video); later runs reuse the saved scores.
 | `--pace 2` | cut twice as often |
 | `--speed 1.7` | play action clips faster |
 | `--sync` | speed follows loudness: quiet = `--slow` (0.75), loud = `--speed` |
+| `--ramp 0.4` | speed ramp on chase, guns and explosion clips: they start fast and settle (0 = off, 0.8 = strongest) |
 
 ### Look
 | Switch | What it does |
@@ -214,6 +218,7 @@ model (slow, once per video); later runs reuse the saved scores.
 | `--sat 1.5` | colour strength |
 | `--bright 6` | how strongly dark footage is avoided |
 | `--stack` | whole wide picture in the middle with blurred fill above and below |
+| `--hit-ease snapSettle` | curve the zoom hit settles with; any name from `eases.py`, or `old` for the previous look |
 
 Black bars baked into the source are cropped automatically.
 
@@ -223,6 +228,24 @@ Black bars baked into the source are cropped automatically.
 | `--versions 3` | make three videos from different footage, each scored as a whole edit |
 | `--tries 6` | selections tested per version |
 | `--vary 4` | how much the versions differ |
+| `--review` | also make a blind comparison page of the versions |
+
+### Checks
+Every finished video is checked automatically. `--no-check` turns this off.
+
+| Check | Fails when |
+|---|---|
+| file | no picture or sound, wrong size, wrong length |
+| black | black picture for half a second or more (outside the fades) |
+| frozen | picture stands still for a second or more (a still end card is allowed) |
+| loudness | far from -14 LUFS, or peaks above 0 dB |
+| silence | no sound for a second or more |
+
+A failed check does not delete the video. The script finishes the other
+versions, then stops with the names of the ones to look at.
+
+The sound is set to -14 LUFS in two passes: the song is measured first, then
+one fixed volume change is applied, so the volume does not pump.
 
 ### Example
 ```
@@ -231,5 +254,29 @@ python3 mashup.py --song song.mp3 --pro --uniform --versions 3 --clips 30 \
   --text "COMING SOON" video1.mp4 video2.mp4 video3.mp4 \
   --skip video3.mp4:220-230
 ```
+
+## check.py: check any finished video
+
+```
+python3 check.py outbox/mashup_song.mp4
+python3 check.py outbox/mashup_song.mp4 --expect 60 --size 1080x1920 --tail 2.5
+```
+`--tail` is the length of a still end card, so it is not reported as frozen.
+Exit code 0 means nothing failed.
+
+## review.py: compare versions blind
+
+```
+python3 review.py outbox/mashup_song_v1.mp4 outbox/mashup_song_v2.mp4 outbox/mashup_song_v3.mp4
+xdg-open outbox/review/index.html
+```
+The page shows the videos as A, B, C in a random order, plays them in sync,
+and only shows the real file names after you press Reveal.
+
+## eases.py: easing curves
+
+Twelve motion curves used for the zoom hit, the speed ramp and the caption.
+`python3 eases.py` prints them. The curve maths is ported from
+[motionmaxxing](https://github.com/Tejashmakwana/motionmaxxing) (Apache-2.0).
 
 Only use footage and music you have the rights to.

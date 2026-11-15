@@ -12,10 +12,19 @@ Options:
   --start 30    where in the song to begin (default: picked automatically around the drop)
   --wide        make a 1920x1080 video instead of vertical 1080x1920
   --out FILE    output file (default ~/clipper/outbox/mashup_<song>.mp4)
+  --ramp 0.4    action clips start fast and settle (speed ramp)
+  --endcard F   picture or short video shown after the mashup
+  --review      with --versions: make a blind comparison page
+Every finished video is checked (black frames, frozen picture, loudness, silence); --no-check turns that off.
 """
 import argparse, bisect, random, re, shutil, subprocess, sys, tempfile
 from pathlib import Path
+import json
 import numpy as np
+try:
+    import eases, check, review
+except ImportError as err:
+    sys.exit(f"{err}. Put eases.py, check.py and review.py in the same folder as mashup.py.")
 
 HOME = Path.home()
 FF = "/usr/bin/ffmpeg" if Path("/usr/bin/ffmpeg").exists() else shutil.which("ffmpeg")
@@ -37,6 +46,9 @@ GRADE = ""       # colour filter put on every clip
 STACK = False    # whole picture in the middle, blurred copy above and below
 TEXT = ""        # caption shown in the middle of the video
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+HIT_EASE = "snapSettle"   # curve the zoom "hit" settles with (a name from eases.py, or "old")
+RAMP = 0.0       # set by --ramp: action clips start fast and settle (0 = constant speed)
+LUFS, TRUE_PEAK = -14, -2   # loudness target and peak ceiling for the finished video
 _SIZE = {}
 
 
@@ -106,7 +118,7 @@ def find_beats(onset):
     return np.array(beats[::-1]), 60 * fps / period
 
 
-def plan_song(song, length, start):
+def plan_song(song, length, start, tail=0.0):
     """Returns (start, length, segments). Each segment: dict(t0, t1, energy, hit)."""
     y = load_audio(song)
     onset, rms = analyse(y)
@@ -115,13 +127,13 @@ def plan_song(song, length, start):
     beats, bpm = find_beats(onset)
     bt = beats / fps
     loud = smooth(rms, fps * 2)
-    length = min(length, dur)
+    length = min(length, max(5.0, dur - tail))   # tail: seconds of song kept for the end card
     if start is None:  # put the first loud section about a third of the way in
         drop = np.argmax(smooth(rms, fps * 4) >= 0.7 * smooth(rms, fps * 4).max()) / fps
         start = max(0.0, drop - 0.35 * length)
         if len(bt):
             start = float(bt[np.argmin(np.abs(bt - start))])
-    start = max(0.0, min(start, dur - length))
+    start = max(0.0, min(start, dur - length - tail))
     keep = (bt >= start) & (bt <= start + length)
     b, bf = bt[keep] - start, beats[keep]
     if len(b) < 8:  # no clear beat: fall back to a cut every half second
@@ -521,7 +533,39 @@ class Picker:
 
 
 # ---------------------------------------------------------------- render
-def render(segs, song, start, length, out, wide, logo=None):
+def loudness_filter(song, start, total, fades):
+    """Two-pass loudness: measure the song first, then apply one fixed volume change.
+    (One pass has to guess as it goes, which can make the volume pump up and down.)"""
+    one_pass = f"loudnorm=I={LUFS}:TP={TRUE_PEAK}"
+    r = run([FF, "-nostats", "-v", "info", "-ss", f"{start:.3f}", "-t", f"{total:.3f}", "-i", song,
+             "-af", f"{fades},loudnorm=I={LUFS}:TP={TRUE_PEAK}:LRA=11:print_format=json", "-f", "null", "-"], text=True)
+    found = re.findall(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr)
+    try:
+        m = json.loads(found[-1])
+        vals = [float(m[k]) for k in ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")]
+    except (IndexError, KeyError, ValueError):
+        return one_pass
+    if not all(np.isfinite(vals)):
+        return one_pass
+    lra = min(50, max(11, int(np.ceil(vals[2]))))   # wide enough that the song's own dynamics are kept
+    print(f"song loudness: {vals[0]:.1f} LUFS, moving it to {LUFS}")
+    return (f"loudnorm=I={LUFS}:TP={TRUE_PEAK}:LRA={lra}:measured_I={m['input_i']}:measured_TP={m['input_tp']}:"
+            f"measured_LRA={m['input_lra']}:measured_thresh={m['input_thresh']}:offset={m['target_offset']}:linear=true")
+
+
+def card_length(card, seconds):
+    """How long the end card is shown: a picture for `seconds`, a video for its own length (8 s at most)."""
+    if not card:
+        return 0.0
+    if Path(card).suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
+        return float(seconds)
+    try:
+        return round(min(8.0, float(probe(card, "format=duration"))), 2)
+    except ValueError:
+        sys.exit(f"could not read the end card: {card}")
+
+
+def render(segs, song, start, length, out, wide, logo=None, card=None, card_d=0.0):
     W, H = (1920, 1080) if wide else (1080, 1920)
     tmp = Path(tempfile.mkdtemp(prefix="mashup_"))
     parts = []
@@ -535,13 +579,20 @@ def render(segs, song, start, length, out, wide, logo=None):
                   f"[sbg][sfg]overlay=0:(H-h)/2,setsar=1")
         else:
             vf = f"{pre}scale={zw}:{zh}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1"
-        if s["speed"] != 1:                                # slight slow motion as tension falls
+        if RAMP > 0 and s["act"] in HIT_ACTS:              # speed ramp: starts fast, settles by the next cut
+            v = f"(T-STARTT)/{s['src_d']:.4f}"             # how far through the source clip, 0 to 1
+            vf += (f",setpts='{s['frames'] / FPS:.4f}*({1 - RAMP:.3f}*{v}+{RAMP:.3f}*{eases.expr('gentleIn', v)})/TB'")
+        elif s["speed"] != 1:                              # slight slow motion as tension falls
             vf += f",setpts=PTS/{s['speed']}"
         vf += f",fps={FPS}"
         dur = s["frames"] / FPS
         punch, tin = s.get("punch", 0.0), s.get("tin")
         if ZOOM > 0 or punch > 0:   # slow push-in across the clip, plus a quick zoom "hit" on the cut
-            grow = f"(1+{ZOOM}*t/{dur:.3f}+{punch}*exp(-t/0.09))"
+            if HIT_EASE == "old":
+                hit = "exp(-t/0.09)"
+            else:               # the hit settles along a measured curve and lands exactly on its mark
+                hit = f"(1-{eases.expr(HIT_EASE, f't/{eases.seconds(HIT_EASE):.3f}')})"
+            grow = f"(1+max(0,{ZOOM}*t/{dur:.3f}+{punch}*{hit}))"
             vf += (f",scale=w='2*trunc({W}*{grow}/2)':h='2*trunc({H}*{grow}/2)':eval=frame"
                    f",crop={W}:{H}:x='{W}*({grow}-1)/2':y='{H}*({grow}-1)/2'")
         if tin == "flash":          # white flash on the strongest beats
@@ -566,30 +617,43 @@ def render(segs, song, start, length, out, wide, logo=None):
     print()
     lst = tmp / "list.txt"
     lst.write_text("".join(f"file '{p}'\n" for p in parts))
+    total = length + card_d
     cap = ""
-    if TEXT:
+    if TEXT:   # caption rises into place and fades in, instead of sitting there from frame one
         (tmp / "text.txt").write_text(TEXT.upper())
         ff = f"fontfile={FONT}:" if Path(FONT).exists() else ""
+        t0, rise = 0.4, int(H * 0.035)
+        land = eases.expr("softLand", f"(t-{t0})/{eases.seconds('softLand'):.3f}")
         cap = (f",drawtext={ff}textfile={tmp / 'text.txt'}:fontsize={int(W * 0.052)}:fontcolor=white:"
-               f"borderw=4:bordercolor=black@0.9:shadowx=3:shadowy=3:x=(w-text_w)/2:y=h*0.64")
-    fc = (f"[0:v]fade=t=in:st=0:d=0.4,fade=t=out:st={length - 1:.2f}:d=1{cap}[v];"
-          f"[1:a]afade=t=in:st=0:d=0.3,afade=t=out:st={length - 1.5:.2f}:d=1.5,loudnorm=I=-14:TP=-2,"
-          f"alimiter=limit=0.84:attack=3:release=60:level=0[a]")
-    extra = []
+               f"borderw=4:bordercolor=black@0.9:shadowx=3:shadowy=3:x=(w-text_w)/2:"
+               f"y='h*0.64+{rise}*(1-{land})':alpha='clip((t-{t0})/0.17,0,1)'")
+    fc, last, extra = f"[0:v]fade=t=in:st=0:d=0.4{cap}[main]", "main", []
     if logo:   # logo in the centre: fades in, holds, then fades out while the video keeps playing
         hold, fade = 2.5, 1.0
-        extra = ["-loop", "1", "-t", f"{hold + fade + 0.5}", "-i", logo]
-        fc = fc.replace("[v];", "[base];", 1) + (
-            f";[2:v]format=rgba,scale={int(W * 0.7)}:-1,fade=t=in:st=0:d=0.3:alpha=1,"
-            f"fade=t=out:st={hold}:d={fade}:alpha=1[lg];[base][lg]overlay=(W-w)/2:(H-h)/2:eof_action=pass[v]")
+        extra += ["-loop", "1", "-t", f"{hold + fade + 0.5}", "-i", logo]
+        fc += (f";[2:v]format=rgba,scale={int(W * 0.7)}:-1,fade=t=in:st=0:d=0.3:alpha=1,"
+               f"fade=t=out:st={hold}:d={fade}:alpha=1[lg];[main][lg]overlay=(W-w)/2:(H-h)/2:eof_action=pass[logod]")
+        last = "logod"
+    if card:   # end card after the last shot; the song keeps playing under it
+        still = Path(card).suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")
+        extra += (["-loop", "1", "-framerate", FPS] if still else []) + ["-t", f"{card_d:.3f}", "-i", card]
+        fc += (f";[{2 + bool(logo)}:v]scale={W}:{H}:force_original_aspect_ratio=decrease,"
+               f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={FPS},format=yuv420p[card];"
+               f"[{last}]setsar=1,format=yuv420p[body];[body][card]concat=n=2:v=1:a=0[joined]")
+        last = "joined"
+    fades = f"afade=t=in:st=0:d=0.3,afade=t=out:st={total - 1.5:.2f}:d=1.5"
+    fc += (f";[{last}]fade=t=out:st={total - 1:.2f}:d=1[v];"
+           f"[1:a]{fades},{loudness_filter(song, start, total, fades)},"
+           f"alimiter=limit=0.84:attack=3:release=60:level=0[a]")
     r = run([FF, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst,
-             "-ss", f"{start:.3f}", "-t", f"{length:.3f}", "-i", song, *extra, "-filter_complex", fc,
+             "-ss", f"{start:.3f}", "-t", f"{total:.3f}", "-i", song, *extra, "-filter_complex", fc,
              "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "fast", "-crf", "18",
              "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-shortest", "-movflags", "+faststart", out],
             text=True)
     shutil.rmtree(tmp, ignore_errors=True)
     if r.returncode:
         sys.exit(f"final render failed: {r.stderr[-1500:]}")
+    return (W, H), total
 
 
 def edit_score(segs, n_sources):
@@ -639,6 +703,12 @@ def main():
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--each", type=int, default=0)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--hit-ease", default="snapSettle", choices=eases.NAMES + ["old"])
+    ap.add_argument("--ramp", type=float, default=0.0)
+    ap.add_argument("--endcard", default=None)
+    ap.add_argument("--endcard-seconds", type=float, default=2.5)
+    ap.add_argument("--no-check", action="store_true")
+    ap.add_argument("--review", action="store_true")
     a = ap.parse_args()
     for spec in a.skip:   # --skip name.mp4:40-50
         name, _, rng = spec.rpartition(":")
@@ -646,7 +716,11 @@ def main():
         if not name or not t1:
             sys.exit(f"--skip should look like video.mp4:40-50, got: {spec}")
         SKIP.append((name, float(t0), float(t1)))
-    global FPS, MATCH, ZOOM, FADE, PACE, MAXSHOT, DARK, GRADE, STACK, TEXT, SPREAD
+    global FPS, MATCH, ZOOM, FADE, PACE, MAXSHOT, DARK, GRADE, STACK, TEXT, SPREAD, HIT_EASE, RAMP
+    HIT_EASE, RAMP = a.hit_ease, max(0.0, min(0.8, a.ramp))
+    if a.endcard and not Path(a.endcard).exists():
+        sys.exit(f"not found: {a.endcard}")
+    card_d = card_length(a.endcard, a.endcard_seconds)
     SPREAD = a.spread
     ZOOM, FADE = (a.zoom_amount if a.zoom or a.pro else 0.0), a.fadein
     PACE = a.pace or (2.0 if a.pro else 1.0)
@@ -668,7 +742,7 @@ def main():
     out = Path(a.out) if a.out else HOME / "clipper/outbox" / f"mashup_{song.stem}.mp4"
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    start, length, segs = plan_song(song, a.length, a.start)
+    start, length, segs = plan_song(song, a.length, a.start, card_d)
     if a.clips:
         set_clip_count(segs, a.clips)
     assign_acts(segs, length)
@@ -715,7 +789,7 @@ def main():
                 s["tin"], s["punch"] = "cut", 0.05
             if k and s["act"] == "explosion":   # explosions always get the white flash and a bigger hit
                 s["tin"], s["punch"] = "flash", 0.14
-    out0 = out
+    out0, made, failed = out, [], []
     tries = a.tries or (6 if a.versions > 1 else 1)
     for ver in range(max(1, a.versions)):
         best = None
@@ -767,10 +841,22 @@ def main():
         Path(str(out) + ".edit.txt").write_text("\n".join(lines) + "\n")
         if a.logo and not Path(a.logo).exists():
             sys.exit(f"not found: {a.logo}")
-        render(segs, song, start, length, out, a.wide, a.logo)
+        size, total = render(segs, song, start, length, out, a.wide, a.logo, a.endcard, card_d)
         print(f"made {out}")
+        made.append(out)
+        if not a.no_check and not check.report(check.check(out, total, size, card_d, LUFS), out.name):
+            failed.append(out)
         with open(HIST, "a") as h:               # remember what was used, for --fresh next time
             h.write("".join(f"{x['src'].name} {x['src_t']:.1f} {x['src_t'] + x['src_d']:.1f}\n" for x in segs))
+    if len(made) > 1:
+        if a.review:
+            page = review.build(made, title=f"{song.stem} versions")
+            print(f"blind comparison page: {page}\n  open it with:  xdg-open {page}")
+        else:
+            print("compare the versions blind with:\n  python3 " + str(Path(__file__).resolve().parent / "review.py")
+                  + " " + " ".join(str(m) for m in made))
+    if failed:
+        sys.exit("FAILED CHECKS, look before posting: " + ", ".join(f.name for f in failed))
 
 
 if __name__ == "__main__":
