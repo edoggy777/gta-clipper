@@ -166,3 +166,70 @@ their content, and platforms remove videos that break them.
 ## License
 
 MIT
+
+## mashup.py: cut several videos into one edit paced to a song
+
+```
+python3 mashup.py --song song.mp3 video1.mp4 video2.mp4 ...
+```
+Cuts land on the song's beats. The first run scores each video with the vision
+model (slow, once per video); later runs reuse the saved scores.
+
+### Basics
+| Switch | What it does |
+|---|---|
+| `--length 60` | seconds of the song to use |
+| `--start 30` | where in the song to begin (default: chosen around the drop) |
+| `--wide` | 1920x1080 output (default is vertical 1080x1920) |
+| `--out FILE` | output file (default `~/clipper/outbox/mashup_<song>.mp4`) |
+| `--logo FILE.png` | logo that fades in and out at the start |
+| `--text "CAPTION"` | caption in the middle of the video |
+
+### What goes in the edit
+| Switch | What it does |
+|---|---|
+| `--clips 30` | exact number of clips |
+| `--explosions 6` | number of explosion shots, spread evenly |
+| `--chase 8`, `--guns 12`, `--drugs 2`, `--emotional 3` | number of each shot type |
+| `--skip video.mp4:40-50` | never use seconds 40 to 50 of that video (repeatable) |
+| `--each 5` | at least 5 clips from every input video |
+| `--spread 6` | how strongly clips are shared between videos (0 = off) |
+| `--fresh` | stay away from clips used in earlier runs (`used_clips.txt`) |
+
+### Fit to the music
+| Switch | What it does |
+|---|---|
+| `--match 8` | prefer footage whose movement matches the song's loudness (0 = off) |
+| `--pace 2` | cut twice as often |
+| `--speed 1.7` | play action clips faster |
+| `--sync` | speed follows loudness: quiet = `--slow` (0.75), loud = `--speed` |
+
+### Look
+| Switch | What it does |
+|---|---|
+| `--pro` | faster cuts, colour grade, flash and zoom-hit transitions, avoids dark footage |
+| `--uniform` | match brightness and colour of all clips (`--uniform-strength 0.7`) |
+| `--zoom` | slow zoom-in on every clip (`--zoom-amount 0.04`) |
+| `--fadein 0.35` | fade-in length on each clip, in seconds (0 = off) |
+| `--sat 1.5` | colour strength |
+| `--bright 6` | how strongly dark footage is avoided |
+| `--stack` | whole wide picture in the middle with blurred fill above and below |
+
+Black bars baked into the source are cropped automatically.
+
+### Several versions
+| Switch | What it does |
+|---|---|
+| `--versions 3` | make three videos from different footage, each scored as a whole edit |
+| `--tries 6` | selections tested per version |
+| `--vary 4` | how much the versions differ |
+
+### Example
+```
+python3 mashup.py --song song.mp3 --pro --uniform --versions 3 --clips 30 \
+  --each 5 --explosions 6 --guns 12 --chase 8 --speed 1.7 \
+  --text "COMING SOON" video1.mp4 video2.mp4 video3.mp4 \
+  --skip video3.mp4:220-230
+```
+
+Only use footage and music you have the rights to.
