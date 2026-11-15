@@ -13,7 +13,7 @@ Options:
   --wide        make a 1920x1080 video instead of vertical 1080x1920
   --out FILE    output file (default ~/clipper/outbox/mashup_<song>.mp4)
 """
-import argparse, bisect, re, shutil, subprocess, sys, tempfile
+import argparse, bisect, random, re, shutil, subprocess, sys, tempfile
 from pathlib import Path
 import numpy as np
 
@@ -24,6 +24,20 @@ VLM = HOME / "clipper/vlm_score.py"
 WORK = HOME / "clipper/work"
 SR, HOP, NFFT, FPS = 22050, 512, 1024, 30
 MOVE = 8
+ZOOM = 0.0      # set by --zoom: each clip slowly zooms in by this much (0.04 = 4%)
+FADE = 0.15     # with --zoom, each clip also fades in over this many seconds
+MATCH = 8.0                                 # how strongly clips must fit the song (0 = off)
+HIT_ACTS = ("explosion", "guns", "chase")   # shots whose big moment is lined up with the beat
+PACE = 1.0       # 2 = cut twice as often
+SPREAD = 6.0     # how strongly clips are shared out between the source videos (0 = off)
+HIST = HOME / "clipper/used_clips.txt"   # footage used by earlier runs
+MAXSHOT = 6.0    # longest single shot, in seconds
+DARK = 0.0       # how strongly dark footage is avoided (0 = off)
+GRADE = ""       # colour filter put on every clip
+STACK = False    # whole picture in the middle, blurred copy above and below
+TEXT = ""        # caption shown in the middle of the video
+FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+_SIZE = {}
 
 
 def run(cmd, **kw):
@@ -121,16 +135,18 @@ def plan_song(song, length, start):
     segs, i = [], 0
     while i < len(b) - 1:
         n = 8 if e[i] < lo else 4 if e[i] < hi else 2
+        n = max(1, round(n / PACE))
         if not segs:
-            n = max(n, 8)
+            n = max(n, round(8 / PACE))
         end = lambda k: b[i + k] if i + k < len(b) else length
         t0 = 0.0 if not segs else b[i]
         while end(n) - t0 < 0.7 and i + n < len(b):
             n *= 2
-        while n > 1 and end(n) - t0 > 6.0:
+        while n > 1 and end(n) - t0 > MAXSHOT:
             n //= 2
         level = "low" if e[i:i + n].mean() < lo else "mid" if e[i:i + n].mean() < hi else "high"
-        segs.append(dict(t0=t0, t1=end(n), level=level, hit=float(hit[i])))
+        segs.append(dict(t0=t0, t1=end(n), level=level, hit=float(hit[i]),
+                         energy=float(e[i:i + n].mean())))
         i += n
     segs[-1]["t1"] = length
     if len(segs) > 1 and segs[-1]["t1"] - segs[-1]["t0"] < 0.7:
@@ -138,6 +154,31 @@ def plan_song(song, length, start):
         segs[-1]["t1"] = length
     print(f"song: {bpm:.0f} BPM, using {start:.1f}s to {start + length:.1f}s, {len(segs)} cuts")
     return start, length, segs
+
+
+def set_clip_count(segs, n):
+    """Merges the shortest cuts, or splits the longest, until there are exactly n clips."""
+    dur = lambda j: segs[j]["t1"] - segs[j]["t0"]
+    while len(segs) > max(1, n):
+        k = min(range(len(segs)), key=dur)
+        if k == 0:
+            j = 1
+        elif k == len(segs) - 1 or dur(k - 1) <= dur(k + 1):
+            j = k - 1
+        else:
+            j = k + 1
+        a, b = min(k, j), max(k, j)
+        la, lb = dur(a), dur(b)
+        keep = segs[a] if la >= lb else segs[b]
+        energy = (segs[a].get("energy", 0) * la + segs[b].get("energy", 0) * lb) / (la + lb)
+        segs[a:b + 1] = [dict(keep, t0=segs[a]["t0"], t1=segs[b]["t1"], hit=segs[a]["hit"], energy=energy)]
+    while len(segs) < n:
+        k = max(range(len(segs)), key=dur)
+        if dur(k) < 0.8:      # clips would get too short to see
+            break
+        mid = (segs[k]["t0"] + segs[k]["t1"]) / 2
+        segs[k:k + 1] = [dict(segs[k], t1=mid), dict(segs[k], t0=mid)]
+    print(f"clips: {len(segs)}")
 
 
 def assign_acts(segs, length):
@@ -281,6 +322,11 @@ def motion_curve(video):
     def at(t):
         w = vv[(tt >= t - 1) & (tt <= t + 2)]
         return float((vv < np.median(w)).mean()) if len(w) else 0.5
+
+    def peak(t0, t1):
+        m = (tt >= t0) & (tt <= t1)
+        return float(tt[m][np.argmax(vv[m])]) if m.any() else None
+    at.peak = peak
     return at
 
 
@@ -293,6 +339,80 @@ def scene_cuts(video, dur):
                  "scale=320:-2,select='gt(scene,0.3)',showinfo", "-f", "null", "-"], text=True)
         cache.write_text("\n".join(re.findall(r"pts_time:([\d.]+)", r.stderr)) + "\n")
     return [0.0] + [float(x) for x in cache.read_text().split()] + [dur]
+
+
+def luma_curve(video):
+    """Returns a function: time -> how bright the picture is there (0 black .. 255 white)."""
+    cache = Path(str(video) + ".luma.txt")
+    if not cache.exists():
+        print(f"measuring brightness in {video.name} ...", flush=True)
+        r = run([FF, "-nostats", "-v", "error", "-i", video, "-an", "-vf",
+                 "fps=1,scale=64:-2,signalstats,metadata=print:file=-", "-f", "null", "-"], text=True)
+        t = re.findall(r"pts_time:([\d.]+)", r.stdout)
+        v = re.findall(r"YAVG=([\d.]+)", r.stdout)
+        cache.write_text("".join(f"{a} {b}\n" for a, b in zip(t, v)))
+    rows = [line.split() for line in cache.read_text().splitlines()]
+    if len(rows) < 4:
+        return lambda t: 128.0
+    tt = np.array([float(a) for a, _ in rows]); vv = np.array([float(b) for _, b in rows])
+    return lambda t: float(np.interp(t, tt, vv))
+
+
+def bars(src, t, d):
+    """Returns a crop filter if this part of the source has black bars baked in, else nothing."""
+    if src not in _SIZE:
+        try:
+            _SIZE[src] = tuple(int(x) for x in probe(src, "stream=width,height", "v:0").split(",")[:2])
+        except ValueError:
+            _SIZE[src] = (0, 0)
+    sw, sh = _SIZE[src]
+    r = run([FF, "-nostats", "-v", "info", "-ss", f"{t:.3f}", "-t", f"{min(d, 3):.3f}", "-i", src, "-an",
+             "-vf", "cropdetect=limit=24:round=2:reset=0", "-f", "null", "-"], text=True)
+    found = re.findall(r"crop=(\d+):(\d+):(\d+):(\d+)", r.stderr)
+    if not found or not sw:
+        return ""
+    w, h, x, y = (int(v) for v in found[-1])
+    top, left = min(y, sh - h - y), min(x, sw - w - x)   # same amount off both sides
+    top = top if 0.03 * sh <= top <= 0.25 * sh else 0
+    left = left if 0.03 * sw <= left <= 0.25 * sw else 0
+    return f"crop={sw - 2 * left}:{sh - 2 * top}:{left}:{top}," if top or left else ""
+
+
+def clip_look(src, t, d, pre):
+    """Average brightness, contrast, colour strength and colour cast of one clip."""
+    r = run([FF, "-nostats", "-v", "error", "-ss", f"{t:.3f}", "-t", f"{min(d, 4):.3f}", "-i", src, "-an",
+             "-vf", f"{pre}fps=3,scale=160:-2,signalstats,metadata=print:file=-", "-f", "null", "-"], text=True)
+    get = lambda key: [float(x) for x in re.findall(key + r"=([\d.]+)", r.stdout)]
+    y = get("YAVG")
+    if not y:
+        return None
+    return dict(y=float(np.mean(y)), spread=float(np.mean(get("YHIGH")) - np.mean(get("YLOW"))),
+                sat=float(np.mean(get("SATAVG"))), u=float(np.mean(get("UAVG"))), v=float(np.mean(get("VAVG"))))
+
+
+def match_looks(segs, k):
+    """Pulls every clip toward the middle look of the whole edit. k: 0 = no change, 1 = full match."""
+    for s in segs:
+        s["pre"] = bars(s["src"], s["src_t"], s["src_d"])
+        s["look"] = clip_look(s["src"], s["src_t"], s["src_d"], s["pre"])
+    looks = [s["look"] for s in segs if s["look"]]
+    if len(looks) < 2:
+        return
+    tgt = {key: float(np.median([l[key] for l in looks])) for key in looks[0]}
+    lim = lambda x, a, b: max(a, min(b, x))
+    for s in segs:
+        l = s["look"]
+        if not l:
+            continue
+        m, mt = lim((l["y"] - 16) / 219, 0.03, 0.97), lim((tgt["y"] - 16) / 219, 0.03, 0.97)
+        gamma = lim(1 + k * (np.log(m) / np.log(mt) - 1), 0.6, 1.8)        # brightness
+        con = lim(1 + k * (tgt["spread"] / max(l["spread"], 1) - 1), 0.8, 1.35)   # contrast
+        sat = lim(1 + k * (tgt["sat"] / max(l["sat"], 0.5) - 1), 0.6, 1.8)        # colour strength
+        du = lim(k * (tgt["u"] - l["u"]), -14, 14)                         # colour cast, blue-yellow
+        dv = lim(k * (tgt["v"] - l["v"]), -14, 14)                         # colour cast, red-green
+        s["match"] = (f"lutyuv=u='clip(val+{du:.1f},16,240)':v='clip(val+{dv:.1f},16,240)',"
+                      f"eq=gamma={gamma:.3f}:contrast={con:.3f}:saturation={sat:.3f}")
+    print(f"matched the look of {len(looks)} clips (brightness {tgt['y']:.0f}, colour {tgt['sat']:.0f})")
 
 
 class Picker:
@@ -310,33 +430,68 @@ class Picker:
     }
 
     def __init__(self, videos):
-        self.cands, self.dur, self.used, self.cuts = [], {}, {}, {}
+        self.cands, self.dur, self.used, self.cuts, self.mot = [], {}, {}, {}, {}
+        self.avoid, self.count, self.jitter, self.rng = {}, {}, 0.0, random.Random(0)
         for v in videos:
             path, rows = prepare(v)
             self.dur[path] = float(probe(path, "format=duration") or 0)
             self.used[path] = []
             self.cuts[path] = scene_cuts(path, self.dur[path])
             mot = motion_curve(path)
-            self.cands += [(path, t, sc + MOVE * mot(t), lab) for t, sc, lab in rows]
+            self.mot[path] = mot
+            lum = luma_curve(path) if DARK else None
+            for t, sc, lab in rows:
+                m = mot(t)
+                dk = DARK * max(0.0, (60 - lum(t + 1)) / 60) if lum else 0.0
+                self.cands.append((path, t, sc + MOVE * m, lab, m, dk))
             labels = [lab for _, _, lab in rows]
             print(f"  {path.name}: " + ", ".join(f"{labels.count(x)} {x}" for x in sorted(set(labels))))
         if not self.cands:
             sys.exit("no scored frames in any input video")
 
-    def free(self, path, s, d):
+    def reset(self, seed, jitter):
+        """Start a new edit: nothing used yet, and a new random variation."""
+        self.used = {p: [] for p in self.dur}
+        self.count, self.jitter, self.rng = {}, jitter, random.Random(seed)
+
+    def block(self, segs):
+        """Keep later versions away from the footage this edit used."""
+        for s in segs:
+            self.avoid.setdefault(s["src"], []).append((s["src_t"] - 1, s["src_t"] + s["src_d"] + 1))
+
+    def load_history(self):
+        names = {p.name: p for p in self.dur}
+        n = 0
+        for line in (HIST.read_text().splitlines() if HIST.exists() else []):
+            f = line.rsplit(" ", 2)
+            if len(f) == 3 and f[0] in names:
+                self.avoid.setdefault(names[f[0]], []).append((float(f[1]), float(f[2])))
+                n += 1
+        print(f"staying away from {n} clips used in earlier videos")
+
+    def free(self, path, s, d, strict=True):
         if any(Path(path).name == n and s < b and s + d > a for n, a, b in SKIP):
+            return False
+        if strict and any(s < b and s + d > a for a, b in self.avoid.get(path, [])):
             return False
         return all(s + d + 0.5 <= a or s >= b + 0.5 for a, b in self.used[path])
 
-    def pick(self, act, d, frac):
+    def pick(self, act, d, frac, energy=None, only=None):
         for attempt in range(4):
             for labels, desc in self.ORDER[act]:
-                pool = [c for c in self.cands if labels is None or c[3] in labels]
-                pool.sort(key=lambda c: -c[2] if desc else c[2])
+                pool = [c for c in self.cands if (labels is None or c[3] in labels)
+                        and (only is None or c[0] == only)]
+                fit = ((lambda c: MATCH * (1 - abs(c[4] - energy))) if MATCH and energy is not None
+                       else (lambda c: 0.0))
+                picked = max(1, sum(self.count.values()))
+                share = {q: SPREAD * self.count.get(q, 0) / picked for q in self.dur}   # used a lot = pushed back
+                noise = {id(c): self.rng.uniform(0, self.jitter) for c in pool} if self.jitter else {}
+                pen = lambda c: c[5] + share[c[0]] + noise.get(id(c), 0.0)
+                pool.sort(key=lambda c: -(c[2] + fit(c) - pen(c)) if desc else c[2] - fit(c) + pen(c))
                 if act == "rising" and labels and "chase" in labels:
                     pool = pool[:max(1, int(len(pool) * 0.6))]  # keep the best chases for the chase
                 first = int(frac * len(pool)) if act in ("rising", "falling") else 0
-                for path, t, sc, lab in pool[first:] + pool[:first]:
+                for path, t, sc, lab, m, _dk in pool[first:] + pool[:first]:
                     if self.dur[path] < d + 0.2:
                         continue
                     cuts = self.cuts[path]
@@ -344,16 +499,24 @@ class Picker:
                     a, b = cuts[k], cuts[min(k + 1, len(cuts) - 1)]
                     if b - a >= d + 0.3:      # keep the whole clip inside one shot
                         s = min(max(a + 0.15, t - d / 2), b - d - 0.15)
+                        pk = getattr(self.mot[path], "peak", None)
+                        if MATCH and act in HIT_ACTS and pk:
+                            p = pk(max(a, t - 2), min(b, t + 2))
+                            if p is not None and a + 0.15 <= p - 0.35 and p - 0.35 + d <= b - 0.15:
+                                s = p - 0.35
                     elif attempt % 2 == 0:    # shot too short: try other moments first
                         continue
                     else:
                         s = min(max(0.0, t + 1 - d / 2), self.dur[path] - d - 0.1)
-                    if self.free(path, s, d):
+                    if self.free(path, s, d, attempt < 2):
                         self.used[path].append((s, s + d))
-                        return path, s, sc, lab
+                        self.count[path] = self.count.get(path, 0) + 1
+                        return path, s, sc, lab, m
             if attempt % 2:  # everything used once: allow reuse
                 for p in self.used:
                     self.used[p] = []
+        if only is not None:      # that video had nothing usable for this slot: take any video instead
+            return self.pick(act, d, frac, energy)
         sys.exit("input videos are too short for this edit - add more footage or use a smaller --length")
 
 
@@ -365,10 +528,33 @@ def render(segs, song, start, length, out, wide, logo=None):
     for k, s in enumerate(segs):
         zoom = 1.12 if s["act"] == "explosion" else 1.0   # punch in on explosions
         zw, zh = int(W * zoom / 2) * 2, int(H * zoom / 2) * 2
-        vf = f"scale={zw}:{zh}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1"
+        pre = s["pre"] if "pre" in s else bars(s["src"], s["src_t"], s["src_d"])   # cut away black bars
+        if STACK and not wide:   # whole picture in the middle, blurred copy filling above and below
+            vf = (f"{pre}split[sa][sb];[sa]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
+                  f"boxblur=20:2,eq=brightness=-0.10[sbg];[sb]scale={W}:-2[sfg];"
+                  f"[sbg][sfg]overlay=0:(H-h)/2,setsar=1")
+        else:
+            vf = f"{pre}scale={zw}:{zh}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1"
         if s["speed"] != 1:                                # slight slow motion as tension falls
             vf += f",setpts=PTS/{s['speed']}"
-        vf += f",fps={FPS},format=yuv420p"
+        vf += f",fps={FPS}"
+        dur = s["frames"] / FPS
+        punch, tin = s.get("punch", 0.0), s.get("tin")
+        if ZOOM > 0 or punch > 0:   # slow push-in across the clip, plus a quick zoom "hit" on the cut
+            grow = f"(1+{ZOOM}*t/{dur:.3f}+{punch}*exp(-t/0.09))"
+            vf += (f",scale=w='2*trunc({W}*{grow}/2)':h='2*trunc({H}*{grow}/2)':eval=frame"
+                   f",crop={W}:{H}:x='{W}*({grow}-1)/2':y='{H}*({grow}-1)/2'")
+        if tin == "flash":          # white flash on the strongest beats
+            vf += ",fade=t=in:st=0:d=0.14:color=white"
+        elif tin == "dip":          # soft fade from black in quiet parts
+            vf += f",fade=t=in:st=0:d={min(0.3, dur * 0.3):.3f}"
+        elif tin is None and FADE > 0:   # old behaviour: every clip fades in
+            vf += f",fade=t=in:st=0:d={min(FADE, dur * 0.4):.3f}"
+        if s.get("match"):          # per-clip correction so all clips look alike
+            vf += "," + s["match"]
+        if GRADE:
+            vf += "," + GRADE
+        vf += ",format=yuv420p"
         part = tmp / f"seg_{k:03d}.mp4"
         r = run([FF, "-y", "-v", "error", "-ss", f"{s['src_t']:.3f}", "-t", f"{s['src_d'] + 0.5:.3f}",
                  "-i", s["src"], "-an", "-vf", vf, "-frames:v", s["frames"], "-c:v", "libx264",
@@ -380,8 +566,15 @@ def render(segs, song, start, length, out, wide, logo=None):
     print()
     lst = tmp / "list.txt"
     lst.write_text("".join(f"file '{p}'\n" for p in parts))
-    fc = (f"[0:v]fade=t=in:st=0:d=0.4,fade=t=out:st={length - 1:.2f}:d=1[v];"
-          f"[1:a]afade=t=in:st=0:d=0.3,afade=t=out:st={length - 1.5:.2f}:d=1.5,loudnorm=I=-14:TP=-1.5[a]")
+    cap = ""
+    if TEXT:
+        (tmp / "text.txt").write_text(TEXT.upper())
+        ff = f"fontfile={FONT}:" if Path(FONT).exists() else ""
+        cap = (f",drawtext={ff}textfile={tmp / 'text.txt'}:fontsize={int(W * 0.052)}:fontcolor=white:"
+               f"borderw=4:bordercolor=black@0.9:shadowx=3:shadowy=3:x=(w-text_w)/2:y=h*0.64")
+    fc = (f"[0:v]fade=t=in:st=0:d=0.4,fade=t=out:st={length - 1:.2f}:d=1{cap}[v];"
+          f"[1:a]afade=t=in:st=0:d=0.3,afade=t=out:st={length - 1.5:.2f}:d=1.5,loudnorm=I=-14:TP=-2,"
+          f"alimiter=limit=0.84:attack=3:release=60:level=0[a]")
     extra = []
     if logo:   # logo in the centre: fades in, holds, then fades out while the video keeps playing
         hold, fade = 2.5, 1.0
@@ -397,6 +590,16 @@ def render(segs, song, start, length, out, wide, logo=None):
     shutil.rmtree(tmp, ignore_errors=True)
     if r.returncode:
         sys.exit(f"final render failed: {r.stderr[-1500:]}")
+
+
+def edit_score(segs, n_sources):
+    """Scores a whole edit so versions can be compared: footage quality, fit to the song, variety."""
+    quality = float(np.mean([s["score"] for s in segs]))
+    fit = float(np.mean([1 - abs(s["motion"] - s["energy"]) for s in segs]))
+    names = [s["src"] for s in segs]
+    share = np.array([names.count(n) for n in set(names)]) / len(names)
+    variety = float(-(share * np.log(share)).sum() / np.log(n_sources)) if n_sources > 1 else 1.0
+    return quality + 8 * fit + 6 * variety, quality, fit, variety
 
 
 def main():
@@ -416,6 +619,25 @@ def main():
     ap.add_argument("--guns", type=int, default=None)
     ap.add_argument("--drugs", type=int, default=None)
     ap.add_argument("--speed", type=float, default=1.0)
+    ap.add_argument("--zoom", action="store_true")
+    ap.add_argument("--zoom-amount", type=float, default=0.04)
+    ap.add_argument("--fadein", type=float, default=0.35)
+    ap.add_argument("--match", type=float, default=8.0)
+    ap.add_argument("--pro", action="store_true")
+    ap.add_argument("--uniform", action="store_true")
+    ap.add_argument("--uniform-strength", type=float, default=0.7)
+    ap.add_argument("--pace", type=float, default=None)
+    ap.add_argument("--sat", type=float, default=None)
+    ap.add_argument("--bright", type=float, default=None)
+    ap.add_argument("--stack", action="store_true")
+    ap.add_argument("--text", default="")
+    ap.add_argument("--clips", type=int, default=None)
+    ap.add_argument("--versions", type=int, default=1)
+    ap.add_argument("--tries", type=int, default=None)
+    ap.add_argument("--vary", type=float, default=4.0)
+    ap.add_argument("--spread", type=float, default=6.0)
+    ap.add_argument("--fresh", action="store_true")
+    ap.add_argument("--each", type=int, default=0)
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
     for spec in a.skip:   # --skip name.mp4:40-50
@@ -424,7 +646,16 @@ def main():
         if not name or not t1:
             sys.exit(f"--skip should look like video.mp4:40-50, got: {spec}")
         SKIP.append((name, float(t0), float(t1)))
-    global FPS
+    global FPS, MATCH, ZOOM, FADE, PACE, MAXSHOT, DARK, GRADE, STACK, TEXT, SPREAD
+    SPREAD = a.spread
+    ZOOM, FADE = (a.zoom_amount if a.zoom or a.pro else 0.0), a.fadein
+    PACE = a.pace or (2.0 if a.pro else 1.0)
+    MAXSHOT = 6.0 / PACE
+    DARK = a.bright if a.bright is not None else (6.0 if a.pro else 0.0)
+    sat = a.sat or (1.5 if a.pro else 0)
+    GRADE = f"eq=saturation={sat}:contrast=1.10:gamma=1.06,unsharp=5:5:0.5" if sat else ""
+    STACK, TEXT = a.stack, a.text
+    MATCH = a.match
     try:
         n, d = probe(a.videos[0], "stream=r_frame_rate", "v:0").split("/")
         FPS = max(24, min(60, round(float(n) / float(d))))
@@ -438,6 +669,8 @@ def main():
     out.parent.mkdir(parents=True, exist_ok=True)
 
     start, length, segs = plan_song(song, a.length, a.start)
+    if a.clips:
+        set_clip_count(segs, a.clips)
     assign_acts(segs, length)
     if a.explosions is not None:
         scatter_explosions(segs, length, a.explosions)
@@ -451,6 +684,8 @@ def main():
         set_chases(segs, length, a.chase)
     print("footage:")
     picker = Picker(a.videos)
+    if a.fresh:
+        picker.load_history()
     names = {v.name for v in picker.used}
     for n, _, _ in SKIP:
         if n not in names:
@@ -466,22 +701,76 @@ def main():
             fast = a.speed if getattr(a, "speed", 1.0) > 1.0 else 1.5
             s["speed"] = {"low": a.slow, "mid": 1.0}.get(s["level"], fast)
         s["src_d"] = s["frames"] / FPS * s["speed"]
-    seen = {}
-    for act in ("explosion", "emotional", "guns", "drugs", "chase", "intro", "rising", "cutscene", "falling"):  # best footage first
-        for s in segs:
-            if s["act"] == act:
-                frac = seen.get(act, 0) / counts[act]
-                seen[act] = seen.get(act, 0) + 1
-                s["src"], s["src_t"], s["score"], s["label"] = picker.pick(act, s["src_d"], frac)
+    if a.pro:   # white flash + zoom hit on the strongest beats, hard cut elsewhere, soft dip when quiet
+        hits = sorted(s["hit"] for s in segs)
+        strong = hits[int(len(hits) * 0.65)]
+        for k, s in enumerate(segs):
+            if k == 0:
+                s["tin"], s["punch"] = "cut", 0.0
+            elif s["level"] == "low":
+                s["tin"], s["punch"] = "dip", 0.0
+            elif s["level"] == "high" and s["hit"] >= strong:
+                s["tin"], s["punch"] = "flash", 0.10
+            else:
+                s["tin"], s["punch"] = "cut", 0.05
+            if k and s["act"] == "explosion":   # explosions always get the white flash and a bigger hit
+                s["tin"], s["punch"] = "flash", 0.14
+    out0 = out
+    tries = a.tries or (6 if a.versions > 1 else 1)
+    for ver in range(max(1, a.versions)):
+        best = None
+        for trial in range(max(1, tries)):   # try several selections, keep the best whole edit
+            picker.reset(ver * 100 + trial, 0.0 if ver == 0 and trial == 0 else a.vary)
+            for x in segs:
+                x.pop("only", None)
+            if a.each:   # reserve slots so every input video gets at least this many clips
+                has = {q: {c[3] for c in picker.cands if c[0] == q} for q in picker.dur}
+                open_slots = list(range(len(segs)))
+                picker.rng.shuffle(open_slots)
+                for q in [q for _ in range(a.each) for q in picker.dur]:
+                    if not open_slots:
+                        break
+                    want = lambda k: bool((picker.ORDER[segs[k]["act"]][0][0] or set()) & has[q])
+                    k = next((k for k in open_slots if want(k)), open_slots[0])   # a slot this video suits
+                    segs[k]["only"] = q
+                    open_slots.remove(k)
+            seen = {}
+            for act in ("explosion", "emotional", "guns", "drugs", "chase", "intro", "rising", "cutscene", "falling"):  # best footage first
+                for s in segs:
+                    if s["act"] == act:
+                        frac = seen.get(act, 0) / counts[act]
+                        seen[act] = seen.get(act, 0) + 1
+                        s["src"], s["src_t"], s["score"], s["label"], s["motion"] = picker.pick(
+                            act, s["src_d"], frac, s["energy"], s.get("only"))
+            total = edit_score(segs, len(picker.dur))
+            if best is None or total[0] > best[0][0]:
+                best = (total, [dict(x) for x in segs])
+        for x, b in zip(segs, best[1]):
+            x.update(b)
+        picker.block(segs)                       # the next version must use different footage
+        if a.versions > 1:
+            out = out0.with_name(f"{out0.stem}_v{ver + 1}{out0.suffix}")
+        t = best[0]
+        used = sorted({x["src"].name for x in segs})
+        print(f"version {ver + 1}: score {t[0]:.1f}  (footage {t[1]:.1f}, fits song {t[2]:.2f}, "
+              f"variety {t[3]:.2f})  from {len(used)} videos, best of {max(1, tries)} tries")
+        print("  clips per video: " + ", ".join(
+            f"{q.name} {sum(1 for x in segs if x['src'] == q)}" for q in picker.dur))
 
-    lines = [f"{s['t0']:6.2f}s  {s['t1'] - s['t0']:4.1f}s  {s['act']:<9}  "
-             f"{s['src'].name} @ {s['src_t']:.0f}s  ({s['label']} {s['score']:.0f})" for s in segs]
-    print("edit list:\n" + "\n".join(lines))
-    Path(str(out) + ".edit.txt").write_text("\n".join(lines) + "\n")
-    if a.logo and not Path(a.logo).exists():
-        sys.exit(f"not found: {a.logo}")
-    render(segs, song, start, length, out, a.wide, a.logo)
-    print(f"made {out}")
+        if a.uniform:
+            print("matching the look of the clips ...", flush=True)
+            match_looks(segs, max(0.0, min(1.0, a.uniform_strength)))
+        lines = [f"{s['t0']:6.2f}s  {s['t1'] - s['t0']:4.1f}s  {s['act']:<9}  "
+                 f"{s['src'].name} @ {s['src_t']:.0f}s  ({s['label']} {s['score']:.0f})  "
+                 f"song {s['energy']:.2f} / clip {s['motion']:.2f}" for s in segs]
+        print("edit list:\n" + "\n".join(lines))
+        Path(str(out) + ".edit.txt").write_text("\n".join(lines) + "\n")
+        if a.logo and not Path(a.logo).exists():
+            sys.exit(f"not found: {a.logo}")
+        render(segs, song, start, length, out, a.wide, a.logo)
+        print(f"made {out}")
+        with open(HIST, "a") as h:               # remember what was used, for --fresh next time
+            h.write("".join(f"{x['src'].name} {x['src_t']:.1f} {x['src_t'] + x['src_d']:.1f}\n" for x in segs))
 
 
 if __name__ == "__main__":
