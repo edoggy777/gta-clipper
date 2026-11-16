@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 # usage: vlm_score.py video.mp4  -> prints "seconds score" lines
 import sys, cv2, torch, re
-from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
 from PIL import Image
 
 STEP = 2  # seconds between samples
-MODEL = "Qwen/Qwen2.5-VL-3B-Instruct"   # 7B-Instruct if you have 16GB+
-model = Qwen2_5_VLForConditionalGeneration.from_pretrained(MODEL, torch_dtype=torch.bfloat16, device_map="cuda")
+MODEL = "Qwen/Qwen3-VL-8B-Instruct"   # was Qwen/Qwen2.5-VL-3B-Instruct
+model = AutoModelForImageTextToText.from_pretrained(MODEL, device_map="cuda",
+    quantization_config=BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                                           bnb_4bit_compute_dtype=torch.bfloat16))
 proc = AutoProcessor.from_pretrained(MODEL)
 
 Q = ("This is a frame from GTA. Classify it with ONE label from: explosion, guns, drugs, violence, chase, emotional, other. "

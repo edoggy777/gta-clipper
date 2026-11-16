@@ -524,9 +524,6 @@ class Picker:
                         self.used[path].append((s, s + d))
                         self.count[path] = self.count.get(path, 0) + 1
                         return path, s, sc, lab, m
-            if attempt % 2:  # everything used once: allow reuse
-                for p in self.used:
-                    self.used[p] = []
         if only is not None:      # that video had nothing usable for this slot: take any video instead
             return self.pick(act, d, frac, energy)
         sys.exit("input videos are too short for this edit - add more footage or use a smaller --length")
@@ -631,7 +628,7 @@ def render(segs, song, start, length, out, wide, logo=None, card=None, card_d=0.
     if logo:   # logo in the centre: fades in, holds, then fades out while the video keeps playing
         hold, fade = 2.5, 1.0
         extra += ["-loop", "1", "-t", f"{hold + fade + 0.5}", "-i", logo]
-        fc += (f";[2:v]format=rgba,scale={int(W * 0.7)}:-1,fade=t=in:st=0:d=0.3:alpha=1,"
+        fc += (f";[2:v]format=rgba,scale={int(W * 0.35)}:-1,fade=t=in:st=0:d=0.3:alpha=1,"
                f"fade=t=out:st={hold}:d={fade}:alpha=1[lg];[main][lg]overlay=(W-w)/2:(H-h)/2:eof_action=pass[logod]")
         last = "logod"
     if card:   # end card after the last shot; the song keeps playing under it
