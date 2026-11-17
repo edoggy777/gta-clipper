@@ -280,3 +280,9 @@ Twelve motion curves used for the zoom hit, the speed ramp and the caption.
 [motionmaxxing](https://github.com/Tejashmakwana/motionmaxxing) (Apache-2.0).
 
 Only use footage and music you have the rights to.
+
+### More mashup.py switches
+| Switch | What it does |
+|---|---|
+| `--landscape 3` | number of city / scenery shots, spread evenly through the calm parts (videos scored before this switch existed must be rescored) |
+| `--edit FILE.edit.txt` | render a saved edit list exactly: its clips, in the order of its lines |

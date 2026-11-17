@@ -11,8 +11,8 @@ model = AutoModelForImageTextToText.from_pretrained(MODEL, device_map="cuda",
                                            bnb_4bit_compute_dtype=torch.bfloat16))
 proc = AutoProcessor.from_pretrained(MODEL)
 
-Q = ("This is a frame from GTA. Classify it with ONE label from: explosion, guns, drugs, violence, chase, emotional, other. "
-     "guns=weapons drawn or shooting; drugs=drug use, dealing, labs, pills, bags; explosion=fireball, blast, vehicle or building blowing up, big flames or smoke cloud; emotional=close-up of a sad, crying, hugging or thoughtful character, quiet dramatic moment; violence=fights, blood, WASTED screen; "
+Q = ("This is a frame from GTA. Classify it with ONE label from: explosion, guns, drugs, violence, chase, emotional, landscape, other. "
+     "guns=weapons drawn or shooting; drugs=drug use, dealing, labs, pills, bags; explosion=fireball, blast, vehicle or building blowing up, big flames or smoke cloud; emotional=close-up of a sad, crying, hugging or thoughtful character, quiet dramatic moment; landscape=city skyline, streets, buildings, beach, mountains, sunset or other scenery shown as a wide view with no fighting, shooting or chase; violence=fights, blood, WASTED screen; "
      "chase=police pursuit, wanted stars, high-speed driving, crashes; other=calm driving, walking, menus, cutscenes, scenery. "
      "Then rate 0-10 how intense/clip-worthy it is. Reply exactly as: LABEL SCORE")
 
@@ -28,7 +28,7 @@ while True:
     inputs = proc(text=[text], images=[img], return_tensors="pt").to("cuda")
     out = model.generate(**inputs, max_new_tokens=8)
     ans = proc.batch_decode(out[:, inputs.input_ids.shape[1]:], skip_special_tokens=True)[0]
-    m = re.search(r"(explosion|guns|drugs|violence|chase|emotional|other)\D*(\d+)", ans.lower())
+    m = re.search(r"(explosion|guns|drugs|violence|chase|emotional|landscape|other)\D*(\d+)", ans.lower())
     label, score = (m.group(1), int(m.group(2))) if m else ("other", 0)
     print(t, score, label, flush=True)
     t += STEP

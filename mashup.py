@@ -15,6 +15,7 @@ Options:
   --ramp 0.4    action clips start fast and settle (speed ramp)
   --endcard F   picture or short video shown after the mashup
   --review      with --versions: make a blind comparison page
+  --edit FILE   render a saved edit list (a .edit.txt file) exactly: its clips, in its order
 Every finished video is checked (black frames, frozen picture, loudness, silence); --no-check turns that off.
 """
 import argparse, bisect, random, re, shutil, subprocess, sys, tempfile
@@ -256,6 +257,20 @@ def scatter_emotional(segs, length, n):
         free.remove(k)
 
 
+def scatter_landscape(segs, length, n):
+    """n city / landscape shots, spread evenly, taken from the quiet slots first."""
+    free = [j for j in range(1, len(segs)) if segs[j]["act"] in ("cutscene", "falling", "rising")]
+    if len(free) < n:
+        free += [j for j in range(1, len(segs)) if segs[j]["act"] == "chase"]
+    for i in range(n):
+        if not free:
+            break
+        target = (i + 0.25) / n * length
+        k = min(free, key=lambda j: abs((segs[j]["t0"] + segs[j]["t1"]) / 2 - target))
+        segs[k]["act"] = "landscape"
+        free.remove(k)
+
+
 SKIP = []   # (video name, from second, to second) that must never be used
 
 
@@ -438,6 +453,7 @@ class Picker:
         "rising": [({"chase"}, False), ({"guns"}, False), ({"other"}, True), (None, False)],
         "cutscene": [({"other"}, True), ({"chase"}, False), (None, False)],
         "emotional": [({"emotional"}, True), ({"other"}, True), ({"chase"}, False), (None, False)],
+        "landscape": [({"landscape"}, True), ({"other"}, True), ({"emotional"}, True), (None, False)],
         "falling": [({"other"}, True), (None, False)],
     }
 
@@ -653,6 +669,25 @@ def render(segs, song, start, length, out, wide, logo=None, card=None, card_d=0.
     return (W, H), total
 
 
+def read_edit(path):
+    """Reads a saved edit list. Each line gives one clip; the order of the lines is the order of the video."""
+    if not Path(path).exists():
+        sys.exit(f"not found: {path}")
+    rows = []
+    for n, line in enumerate(Path(path).read_text().splitlines(), 1):
+        if not line.strip() or line.strip().startswith("#"):
+            continue
+        m = re.match(r"\s*[\d.]+s\s+[\d.]+s\s+(\w+)\s+(.+?)\s+@\s+([\d.]+)s\s+\((\w+)\s+(-?[\d.]+)\)"
+                     r"(?:\s+song\s+[\d.]+\s+/\s+clip\s+([\d.]+))?", line)
+        if not m or m.group(1) not in Picker.ORDER:
+            sys.exit(f"--edit: cannot read line {n} of {path}:\n  {line}")
+        rows.append(dict(act=m.group(1), name=m.group(2), t=float(m.group(3)), label=m.group(4),
+                         score=float(m.group(5)), motion=float(m.group(6) or 0.5)))
+    if not rows:
+        sys.exit(f"--edit: no clips in {path}")
+    return rows
+
+
 def edit_score(segs, n_sources):
     """Scores a whole edit so versions can be compared: footage quality, fit to the song, variety."""
     quality = float(np.mean([s["score"] for s in segs]))
@@ -677,6 +712,7 @@ def main():
     ap.add_argument("--chase", type=int, default=None)
     ap.add_argument("--skip", action="append", default=[])
     ap.add_argument("--emotional", type=int, default=None)
+    ap.add_argument("--landscape", type=int, default=None)
     ap.add_argument("--guns", type=int, default=None)
     ap.add_argument("--drugs", type=int, default=None)
     ap.add_argument("--speed", type=float, default=1.0)
@@ -706,6 +742,7 @@ def main():
     ap.add_argument("--endcard-seconds", type=float, default=2.5)
     ap.add_argument("--no-check", action="store_true")
     ap.add_argument("--review", action="store_true")
+    ap.add_argument("--edit", default=None)
     a = ap.parse_args()
     for spec in a.skip:   # --skip name.mp4:40-50
         name, _, rng = spec.rpartition(":")
@@ -737,6 +774,11 @@ def main():
     if not song.exists():
         sys.exit(f"not found: {song}")
     out = Path(a.out) if a.out else HOME / "clipper/outbox" / f"mashup_{song.stem}.mp4"
+    fixed = read_edit(a.edit) if a.edit else None
+    if fixed and not a.out:
+        ed = Path(a.edit).resolve()
+        base = Path(ed.name.removesuffix(".edit.txt")).stem.removesuffix("_edit")
+        out = ed.with_name(base + "_edit.mp4")
     out.parent.mkdir(parents=True, exist_ok=True)
 
     start, length, segs = plan_song(song, a.length, a.start, card_d)
@@ -747,6 +789,8 @@ def main():
         scatter_explosions(segs, length, a.explosions)
     if a.emotional:
         scatter_emotional(segs, length, a.emotional)
+    if a.landscape:
+        scatter_landscape(segs, length, a.landscape)
     if a.guns:
         scatter_act(segs, length, a.guns, "guns", 0.25)
     if a.drugs:
@@ -762,6 +806,19 @@ def main():
         if n not in names:
             sys.exit(f"--skip: no video called {n}; the names are: {', '.join(sorted(names))}")
 
+    by_name = {q.name: q for q in picker.dur}
+    if fixed:   # --edit: the saved list decides the clips and their order
+        for f in fixed:
+            if f["name"] not in by_name:
+                sys.exit(f"--edit: {f['name']} is in the list but not on the command; "
+                         f"the videos are: {', '.join(sorted(by_name))}")
+        if len(fixed) != len(segs):   # lines were removed or added: fit the cuts to the list
+            set_clip_count(segs, len(fixed))
+        if len(fixed) != len(segs):
+            sys.exit(f"--edit: the list has {len(fixed)} clips but the song only fits {len(segs)}")
+        for s, f in zip(segs, fixed):
+            s["act"] = f["act"]
+        a.versions, a.tries = 1, 1
     counts = {}
     for s in segs:
         counts[s["act"]] = counts.get(s["act"], 0) + 1
@@ -791,6 +848,13 @@ def main():
     for ver in range(max(1, a.versions)):
         best = None
         for trial in range(max(1, tries)):   # try several selections, keep the best whole edit
+            if fixed:   # --edit: no picking, take the footage from the list
+                for s, f in zip(segs, fixed):
+                    q = by_name[f["name"]]
+                    s["src"], s["score"], s["label"], s["motion"] = q, f["score"], f["label"], f["motion"]
+                    s["src_t"] = max(0.0, min(f["t"], picker.dur[q] - s["src_d"] - 0.1))
+                best = (edit_score(segs, len(picker.dur)), [dict(x) for x in segs])
+                break
             picker.reset(ver * 100 + trial, 0.0 if ver == 0 and trial == 0 else a.vary)
             for x in segs:
                 x.pop("only", None)
@@ -806,7 +870,7 @@ def main():
                     segs[k]["only"] = q
                     open_slots.remove(k)
             seen = {}
-            for act in ("explosion", "emotional", "guns", "drugs", "chase", "intro", "rising", "cutscene", "falling"):  # best footage first
+            for act in ("explosion", "emotional", "landscape", "guns", "drugs", "chase", "intro", "rising", "cutscene", "falling"):  # best footage first
                 for s in segs:
                     if s["act"] == act:
                         frac = seen.get(act, 0) / counts[act]
@@ -835,7 +899,11 @@ def main():
                  f"{s['src'].name} @ {s['src_t']:.0f}s  ({s['label']} {s['score']:.0f})  "
                  f"song {s['energy']:.2f} / clip {s['motion']:.2f}" for s in segs]
         print("edit list:\n" + "\n".join(lines))
-        Path(str(out) + ".edit.txt").write_text("\n".join(lines) + "\n")
+        Path(str(out) + ".edit.txt").write_text("".join(
+            f"{s['t0']:6.2f}s  {s['t1'] - s['t0']:4.1f}s  {s['act']:<9}  "
+            f"{s['src'].name} @ {s['src_t']:.2f}s  ({s['label']} {s['score']:.0f})  "
+            f"song {s['energy']:.2f} / clip {s['motion']:.2f}\n" for s in segs))
+        print(f"edit list saved: {out}.edit.txt")
         if a.logo and not Path(a.logo).exists():
             sys.exit(f"not found: {a.logo}")
         size, total = render(segs, song, start, length, out, a.wide, a.logo, a.endcard, card_d)
