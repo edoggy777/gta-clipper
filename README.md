@@ -226,6 +226,12 @@ model (slow, once per video); later runs reuse the saved scores.
 | `--sat 1.5` | colour strength |
 | `--bright 6` | how strongly dark footage is avoided |
 | `--stack` | whole wide picture in the middle with blurred fill above and below |
+| `--pip` | picture-in-picture cut: the next shot previews in a small grey box, then grows to fill the frame on the beat |
+| `--pip-every 4` | use it on about every 4th cut (1 = every cut that can take it) |
+| `--pip-time 0.6` | seconds the box is on screen before the cut |
+| `--pip-size 0.3` | box width as a share of the frame |
+| `--pip-bars 0.13` | seconds of TV colour bars flashed in the box first (0 = off) |
+| `--pip-corner tr` | box corner: `tl`, `tr`, `bl` or `br` |
 | `--hit-ease snapSettle` | curve the zoom hit settles with; any name from `eases.py`, or `old` for the previous look |
 
 Black bars baked into the source are cropped automatically.

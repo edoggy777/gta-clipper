@@ -16,6 +16,7 @@ Options:
   --endcard F   picture or short video shown after the mashup
   --review      with --versions: make a blind comparison page
   --edit FILE   render a saved edit list (a .edit.txt file) exactly: its clips, in its order
+  --pip         the next shot previews in a small grey box, then grows to fill the frame on the cut
 Every finished video is checked (black frames, frozen picture, loudness, silence); --no-check turns that off.
 """
 import argparse, bisect, random, re, shutil, subprocess, sys, tempfile
@@ -50,6 +51,11 @@ FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 HIT_EASE = "snapSettle"   # curve the zoom "hit" settles with (a name from eases.py, or "old")
 RAMP = 0.0       # set by --ramp: action clips start fast and settle (0 = constant speed)
 LUFS, TRUE_PEAK = -14, -2   # loudness target and peak ceiling for the finished video
+PIP = 0.0        # set by --pip: seconds the next shot is previewed in a small grey box (0 = off)
+PIP_SIZE = 0.3   # width of that box, as a share of the frame
+PIP_GROW = 0.25  # seconds the box takes to grow to the full frame; it lands exactly on the cut
+PIP_CORNER = ""  # tl, tr, bl or br ("" = top right on vertical videos, bottom right on wide ones)
+PIP_BARS = 0.13  # seconds of TV colour bars flashed in the box before the preview shows (0 = off)
 _SIZE = {}
 
 
@@ -578,20 +584,90 @@ def card_length(card, seconds):
         sys.exit(f"could not read the end card: {card}")
 
 
+def base_vf(s, W, H, wide, tag=""):
+    """First part of a clip's filter: cut away black bars, then fill the frame."""
+    zoom = 1.12 if s["act"] == "explosion" else 1.0   # punch in on explosions
+    zw, zh = int(W * zoom / 2) * 2, int(H * zoom / 2) * 2
+    pre = s["pre"] if "pre" in s else bars(s["src"], s["src_t"], s["src_d"])   # cut away black bars
+    if STACK and not wide:   # whole picture in the middle, blurred copy filling above and below
+        return (f"{pre}split[sa{tag}][sb{tag}];[sa{tag}]scale={W}:{H}:force_original_aspect_ratio=increase,"
+                f"crop={W}:{H},boxblur=20:2,eq=brightness=-0.10[sbg{tag}];[sb{tag}]scale={W}:-2[sfg{tag}];"
+                f"[sbg{tag}][sfg{tag}]overlay=0:(H-h)/2,setsar=1")
+    return f"{pre}scale={zw}:{zh}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1"
+
+
+def pip_room(segs, picker, move):
+    """Works out how much footage there is just before each previewed clip (the preview box plays it).
+    Where there is too little, the clip starts a little later inside its own shot to make room."""
+    for s in segs:
+        if not s.get("pip"):
+            continue
+        q, d, need = s["src"], s["src_d"], s["pip"] * s["speed"]
+        cuts = picker.cuts[q]
+        k = max(0, bisect.bisect_right(cuts, s["src_t"] + 0.01) - 1)
+        a, b = cuts[k], cuts[min(k + 1, len(cuts) - 1)]      # the shot this clip sits in
+        shift = min(need - (s["src_t"] - a - 0.1), b - 0.15 - (s["src_t"] + d))
+        if move and shift > 0 and s["act"] not in HIT_ACTS:
+            t = s["src_t"] + shift
+            clash = any(o is not s and o["src"] == q and t < o["src_t"] + o["src_d"] and t + d > o["src_t"]
+                        for o in segs)
+            if not clash and not any(q.name == n and t < t1 and t + d > t0 for n, t0, t1 in SKIP):
+                s["src_t"] = t
+        s["lead"] = max(0.0, min(need, s["src_t"] - a - 0.1))
+
+
+def pip_filter(nxt, W, H, wide, frames):
+    """Extra ffmpeg input and filter graph for one clip: the next shot shows as a small grey preview box
+    during the end of this clip, then grows to the full frame in colour and lands exactly on the cut."""
+    n = max(2, min(round(nxt["pip"] * FPS), frames - 2))     # frames the box is on screen
+    P, T0, dur = n / FPS, (frames - n) / FPS, frames / FPS
+    G = min(PIP_GROW, 0.45 * P)
+    spd = nxt["speed"]
+    lead = max(0.0, min(P * spd, nxt.get("lead", 0.0), nxt["src_t"]))   # footage just before the next clip
+    hold = P - lead / spd                                    # too little of it: hold its first frame
+    pv = base_vf(nxt, W, H, wide, "p")
+    if spd != 1:
+        pv += f",setpts=PTS/{spd}"
+    pv += f",fps={FPS}"
+    if hold > 0.5 / FPS:
+        pv += f",tpad=start_mode=clone:start_duration={hold:.4f}"
+    pv += f",trim=end_frame={n}"
+    if nxt.get("match"):
+        pv += "," + nxt["match"]
+    if GRADE:
+        pv += "," + GRADE
+    p = f"clip((t-{dur - G:.4f})/{G:.4f},0,1)"               # 0 while the box waits, 1 when it is full frame
+    e = f"({p}*{p}*(3-2*{p}))"
+    f = PIP_SIZE
+    w = f"2*trunc({W}*({f:.3f}+{1 - f:.3f}*{e})/2)"
+    h = f"2*trunc({H}*({f:.3f}+{1 - f:.3f}*{e})/2)"
+    corner = PIP_CORNER or ("br" if wide else "tr")
+    x0 = 0.04 * W if corner[1] == "l" else W - W * f - 0.04 * W
+    top, bottom = (0.05 * H, 0.05 * H) if wide else (0.10 * H, 0.22 * H)   # clear of the app's buttons and caption
+    y0 = top if corner[0] == "t" else H - H * f - bottom
+    x, y = f"{x0:.1f}*(1-{e})", f"{y0:.1f}*(1-{e})"
+    b = f"trunc({max(4, round(W * 0.006))}*(1-{e}))"         # white border, gone by the time the box is full
+    fade, tv = f"fade=t=in:st={T0:.4f}:d=0.12:alpha=1,", ""   # no colour bars: the box fades in
+    if PIP_BARS > 0:   # the box switches on like a TV: colour bars for a few frames, then the preview
+        bn = max(1, min(round(PIP_BARS * FPS), n // 3))
+        fade = ""
+        tv = (f"[pg];smptebars=s={W}x{2 * int(H * 0.75)}:r={FPS}:d=2,crop={W}:{H}:0:0,trim=end_frame={bn},"
+              f"setpts=PTS+{T0:.4f}/TB[tv];[pg][tv]overlay=eof_action=pass")
+    graph = (f"[1:v]{pv},setpts=PTS-STARTPTS+{T0:.4f}/TB,hue=s='{e}'{tv},format=yuva420p,{fade}"
+             f"scale=w='{w}':h='{h}':eval=frame[pp];"
+             f"color=c=white:s=64x64:r={FPS}:d={P:.4f},format=yuva420p,setpts=PTS+{T0:.4f}/TB,{fade}"
+             f"scale=w='{w}+2*{b}':h='{h}+2*{b}':eval=frame[pb];"
+             f"[m][pb]overlay=x='{x}-{b}':y='{y}-{b}':eof_action=pass[m1];"
+             f"[m1][pp]overlay=x='{x}':y='{y}':eof_action=pass,format=yuv420p[v]")
+    return ["-ss", f"{nxt['src_t'] - lead:.3f}", "-t", f"{lead + 0.5:.3f}", "-i", nxt["src"]], graph
+
+
 def render(segs, song, start, length, out, wide, logo=None, card=None, card_d=0.0):
     W, H = (1920, 1080) if wide else (1080, 1920)
     tmp = Path(tempfile.mkdtemp(prefix="mashup_"))
     parts = []
     for k, s in enumerate(segs):
-        zoom = 1.12 if s["act"] == "explosion" else 1.0   # punch in on explosions
-        zw, zh = int(W * zoom / 2) * 2, int(H * zoom / 2) * 2
-        pre = s["pre"] if "pre" in s else bars(s["src"], s["src_t"], s["src_d"])   # cut away black bars
-        if STACK and not wide:   # whole picture in the middle, blurred copy filling above and below
-            vf = (f"{pre}split[sa][sb];[sa]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
-                  f"boxblur=20:2,eq=brightness=-0.10[sbg];[sb]scale={W}:-2[sfg];"
-                  f"[sbg][sfg]overlay=0:(H-h)/2,setsar=1")
-        else:
-            vf = f"{pre}scale={zw}:{zh}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1"
+        vf = base_vf(s, W, H, wide)
         if RAMP > 0 and s["act"] in HIT_ACTS:              # speed ramp: starts fast, settles by the next cut
             v = f"(T-STARTT)/{s['src_d']:.4f}"             # how far through the source clip, 0 to 1
             vf += (f",setpts='{s['frames'] / FPS:.4f}*({1 - RAMP:.3f}*{v}+{RAMP:.3f}*{eases.expr('gentleIn', v)})/TB'")
@@ -620,8 +696,13 @@ def render(segs, song, start, length, out, wide, logo=None, card=None, card_d=0.
             vf += "," + GRADE
         vf += ",format=yuv420p"
         part = tmp / f"seg_{k:03d}.mp4"
-        r = run([FF, "-y", "-v", "error", "-ss", f"{s['src_t']:.3f}", "-t", f"{s['src_d'] + 0.5:.3f}",
-                 "-i", s["src"], "-an", "-vf", vf, "-frames:v", s["frames"], "-c:v", "libx264",
+        how = ["-ss", f"{s['src_t']:.3f}", "-t", f"{s['src_d'] + 0.5:.3f}", "-i", s["src"]]
+        if k + 1 < len(segs) and segs[k + 1].get("pip"):   # next shot previews in a box, then fills the frame
+            more, graph = pip_filter(segs[k + 1], W, H, wide, s["frames"])
+            how += more + ["-filter_complex", f"[0:v]{vf}[m];{graph}", "-map", "[v]"]
+        else:
+            how += ["-vf", vf]
+        r = run([FF, "-y", "-v", "error", *how, "-an", "-frames:v", s["frames"], "-c:v", "libx264",
                  "-preset", "veryfast", "-crf", "14", part], text=True)
         if r.returncode or not part.exists():
             sys.exit(f"cut failed on {s['src']}: {r.stderr[-1500:]}")
@@ -743,6 +824,12 @@ def main():
     ap.add_argument("--no-check", action="store_true")
     ap.add_argument("--review", action="store_true")
     ap.add_argument("--edit", default=None)
+    ap.add_argument("--pip", action="store_true")
+    ap.add_argument("--pip-time", type=float, default=0.6)
+    ap.add_argument("--pip-size", type=float, default=0.3)
+    ap.add_argument("--pip-every", type=int, default=4)
+    ap.add_argument("--pip-corner", default="", choices=["", "tl", "tr", "bl", "br"])
+    ap.add_argument("--pip-bars", type=float, default=0.13)
     a = ap.parse_args()
     for spec in a.skip:   # --skip name.mp4:40-50
         name, _, rng = spec.rpartition(":")
@@ -750,8 +837,11 @@ def main():
         if not name or not t1:
             sys.exit(f"--skip should look like video.mp4:40-50, got: {spec}")
         SKIP.append((name, float(t0), float(t1)))
-    global FPS, MATCH, ZOOM, FADE, PACE, MAXSHOT, DARK, GRADE, STACK, TEXT, SPREAD, HIT_EASE, RAMP
+    global FPS, MATCH, ZOOM, FADE, PACE, MAXSHOT, DARK, GRADE, STACK, TEXT, SPREAD, HIT_EASE, RAMP, PIP, PIP_SIZE, PIP_CORNER, PIP_BARS
     HIT_EASE, RAMP = a.hit_ease, max(0.0, min(0.8, a.ramp))
+    PIP = max(0.3, min(3.0, a.pip_time)) if a.pip else 0.0
+    PIP_SIZE, PIP_CORNER = max(0.15, min(0.6, a.pip_size)), a.pip_corner
+    PIP_BARS = max(0.0, min(0.5, a.pip_bars))
     if a.endcard and not Path(a.endcard).exists():
         sys.exit(f"not found: {a.endcard}")
     card_d = card_length(a.endcard, a.endcard_seconds)
@@ -843,6 +933,17 @@ def main():
                 s["tin"], s["punch"] = "cut", 0.05
             if k and s["act"] == "explosion":   # explosions always get the white flash and a bigger hit
                 s["tin"], s["punch"] = "flash", 0.14
+    if PIP:   # about every Nth cut, where the shot before it is long enough to show a preview
+        since, n_pip = 0, 0
+        for k in range(1, len(segs)):
+            since += 1
+            before = segs[k - 1]["frames"] / FPS
+            if since >= max(1, a.pip_every) and before >= 0.9 and segs[k]["act"] != "explosion":
+                segs[k]["pip"] = min(PIP, 0.55 * before)
+                segs[k]["tin"], segs[k]["punch"] = "cut", 0.0   # the growing box is the transition
+                since, n_pip = 0, n_pip + 1
+        print(f"picture-in-picture on {n_pip} of {len(segs) - 1} cuts"
+              + ("" if n_pip else " (no shot is long enough: try --pace 1 or a smaller --clips)"))
     out0, made, failed = out, [], []
     tries = a.tries or (6 if a.versions > 1 else 1)
     for ver in range(max(1, a.versions)):
@@ -882,6 +983,8 @@ def main():
                 best = (total, [dict(x) for x in segs])
         for x, b in zip(segs, best[1]):
             x.update(b)
+        if PIP:
+            pip_room(segs, picker, not fixed)
         picker.block(segs)                       # the next version must use different footage
         if a.versions > 1:
             out = out0.with_name(f"{out0.stem}_v{ver + 1}{out0.suffix}")
