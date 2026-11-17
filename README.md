@@ -1,3 +1,11 @@
+# Support
+
+If you find this project helpful, consider supporting it:
+
+**Ethereum:** `0x0CDdCff8f61B45fB2870d8Bd46A2170Af62220A4`
+
+[Donate with Ethereum](Eth:0x0CDdCff8f61B45fB2870d8Bd46A2170Af62220A4)
+
 # gta-clipper
 
 Turns long gameplay videos into a short, music-paced mashup. You give it a
