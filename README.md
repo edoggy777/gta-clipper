@@ -231,7 +231,7 @@ model (slow, once per video); later runs reuse the saved scores.
 | `--pip-time 0.6` | seconds the box is on screen before the cut |
 | `--pip-size 0.3` | box width as a share of the frame |
 | `--pip-bars 0.13` | seconds of TV colour bars flashed in the box first (0 = off) |
-| `--pip-corner tr` | box corner: `tl`, `tr`, `bl` or `br` |
+| `--pip-corner qtl` | where the box sits: `qtl`, `qtr`, `qbl`, `qbr` = middle of that quarter of the frame (default `qtl`, upper left); `tl`, `tr`, `bl`, `br` = in that corner |
 | `--hit-ease snapSettle` | curve the zoom hit settles with; any name from `eases.py`, or `old` for the previous look |
 
 Black bars baked into the source are cropped automatically.

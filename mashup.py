@@ -54,7 +54,7 @@ LUFS, TRUE_PEAK = -14, -2   # loudness target and peak ceiling for the finished 
 PIP = 0.0        # set by --pip: seconds the next shot is previewed in a small grey box (0 = off)
 PIP_SIZE = 0.3   # width of that box, as a share of the frame
 PIP_GROW = 0.25  # seconds the box takes to grow to the full frame; it lands exactly on the cut
-PIP_CORNER = ""  # tl, tr, bl or br ("" = top right on vertical videos, bottom right on wide ones)
+PIP_CORNER = ""  # qtl, qtr, qbl, qbr = middle of that quarter of the frame; tl, tr, bl, br = in that corner ("" = qtl)
 PIP_BARS = 0.13  # seconds of TV colour bars flashed in the box before the preview shows (0 = off)
 _SIZE = {}
 
@@ -641,10 +641,14 @@ def pip_filter(nxt, W, H, wide, frames):
     f = PIP_SIZE
     w = f"2*trunc({W}*({f:.3f}+{1 - f:.3f}*{e})/2)"
     h = f"2*trunc({H}*({f:.3f}+{1 - f:.3f}*{e})/2)"
-    corner = PIP_CORNER or ("br" if wide else "tr")
-    x0 = 0.04 * W if corner[1] == "l" else W - W * f - 0.04 * W
-    top, bottom = (0.05 * H, 0.05 * H) if wide else (0.10 * H, 0.22 * H)   # clear of the app's buttons and caption
-    y0 = top if corner[0] == "t" else H - H * f - bottom
+    corner = PIP_CORNER or "qtl"
+    if corner[0] == "q":   # middle of one quarter of the frame: qtl = upper left quarter
+        x0 = max(0.0, min(W - W * f, (0.25 if corner[2] == "l" else 0.75) * W - W * f / 2))
+        y0 = max(0.0, min(H - H * f, (0.25 if corner[1] == "t" else 0.75) * H - H * f / 2))
+    else:                  # tucked into a corner
+        x0 = 0.04 * W if corner[1] == "l" else W - W * f - 0.04 * W
+        top, bottom = (0.05 * H, 0.05 * H) if wide else (0.10 * H, 0.22 * H)   # clear of the app's buttons and caption
+        y0 = top if corner[0] == "t" else H - H * f - bottom
     x, y = f"{x0:.1f}*(1-{e})", f"{y0:.1f}*(1-{e})"
     b = f"trunc({max(4, round(W * 0.006))}*(1-{e}))"         # white border, gone by the time the box is full
     fade, tv = f"fade=t=in:st={T0:.4f}:d=0.12:alpha=1,", ""   # no colour bars: the box fades in
@@ -828,7 +832,7 @@ def main():
     ap.add_argument("--pip-time", type=float, default=0.6)
     ap.add_argument("--pip-size", type=float, default=0.3)
     ap.add_argument("--pip-every", type=int, default=4)
-    ap.add_argument("--pip-corner", default="", choices=["", "tl", "tr", "bl", "br"])
+    ap.add_argument("--pip-corner", default="", choices=["", "qtl", "qtr", "qbl", "qbr", "tl", "tr", "bl", "br"])
     ap.add_argument("--pip-bars", type=float, default=0.13)
     a = ap.parse_args()
     for spec in a.skip:   # --skip name.mp4:40-50
