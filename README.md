@@ -315,3 +315,4 @@ Only use footage and music you have the rights to.
 | `--bullet-solo` | bullet flies across with no heart |
 | `--hearts-at 15` | small hearts fall and cover the screen mid-video, finishing on the cut nearest that second |
 | `--hearts --hearts-time 3` | small hearts fall over the last seconds of the video |
+| `--planes 3` | number of airplane shots |
