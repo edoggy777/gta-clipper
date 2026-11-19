@@ -17,6 +17,7 @@ Options:
   --review      with --versions: make a blind comparison page
   --edit FILE   render a saved edit list (a .edit.txt file) exactly: its clips, in its order
   --pip         the next shot previews in a small grey box, then grows to fill the frame on the cut
+  --bullet      a metal bullet flies across, the next shot follows it in; it bounces off a heart, which falls
 Every finished video is checked (black frames, frozen picture, loudness, silence); --no-check turns that off.
 """
 import argparse, bisect, random, re, shutil, subprocess, sys, tempfile
@@ -27,6 +28,16 @@ try:
     import eases, check, review
 except ImportError as err:
     sys.exit(f"{err}. Put eases.py, check.py and review.py in the same folder as mashup.py.")
+
+try:
+    import bullet
+except ImportError as err:
+    sys.exit(f"{err}. Put bullet.py in the same folder as mashup.py.")
+
+try:
+    import petals
+except ImportError as err:
+    sys.exit(f"{err}. Put petals.py in the same folder as mashup.py.")
 
 HOME = Path.home()
 FF = "/usr/bin/ffmpeg" if Path("/usr/bin/ffmpeg").exists() else shutil.which("ffmpeg")
@@ -56,6 +67,10 @@ PIP_SIZE = 0.3   # width of that box, as a share of the frame
 PIP_GROW = 0.25  # seconds the box takes to grow to the full frame; it lands exactly on the cut
 PIP_CORNER = ""  # qtl, qtr, qbl, qbr = middle of that quarter of the frame; tl, tr, bl, br = in that corner ("" = qtl)
 PIP_BARS = 0.13  # seconds of TV colour bars flashed in the box before the preview shows (0 = off)
+HEARTS = 0.0     # set by --hearts: seconds of small hearts falling over the end of the video (0 = off)
+HEARTS_BG = "bars"   # behind the falling hearts: "bars" = TV colour bars that fade to black, "video" = the video itself
+HEARTS_MID = 0.0  # set by --hearts-at: the cut (in seconds) that falling hearts in the middle finish on (0 = off)
+HEARTS_LEN = 3.0  # set by --hearts-time: how long the hearts fall
 _SIZE = {}
 
 
@@ -600,9 +615,9 @@ def pip_room(segs, picker, move):
     """Works out how much footage there is just before each previewed clip (the preview box plays it).
     Where there is too little, the clip starts a little later inside its own shot to make room."""
     for s in segs:
-        if not s.get("pip"):
+        if not (s.get("pip") or s.get("bullet")):
             continue
-        q, d, need = s["src"], s["src_d"], s["pip"] * s["speed"]
+        q, d, need = s["src"], s["src_d"], (s.get("pip") or s["bullet"]) * s["speed"]
         cuts = picker.cuts[q]
         k = max(0, bisect.bisect_right(cuts, s["src_t"] + 0.01) - 1)
         a, b = cuts[k], cuts[min(k + 1, len(cuts) - 1)]      # the shot this clip sits in
@@ -666,6 +681,37 @@ def pip_filter(nxt, W, H, wide, frames):
     return ["-ss", f"{nxt['src_t'] - lead:.3f}", "-t", f"{lead + 0.5:.3f}", "-i", nxt["src"]], graph
 
 
+def bullet_filter(nxt, W, H, wide, frames):
+    """Extra ffmpeg inputs and filter graph for one clip: a bullet crosses the end of this clip and the
+    next shot follows it in (the moving parts are in bullet.py)."""
+    n = max(4, min(round(nxt["bullet"] * FPS), frames - 2))   # frames the transition lasts
+    P, spd = n / FPS, nxt["speed"]
+    lead = max(0.0, min(P * spd, nxt.get("lead", 0.0), nxt["src_t"]))   # footage just before the next clip
+    hold = P - lead / spd                                     # too little of it: hold its first frame
+    pv = base_vf(nxt, W, H, wide, "p")
+    if spd != 1:
+        pv += f",setpts=PTS/{spd}"
+    pv += f",fps={FPS}"
+    if hold > 0.5 / FPS:
+        pv += f",tpad=start_mode=clone:start_duration={hold:.4f}"
+    pv += f",trim=end_frame={n}"
+    if nxt.get("match"):
+        pv += "," + nxt["match"]
+    if GRADE:
+        pv += "," + GRADE
+    more, graph = bullet.graph(pv + ",format=yuv420p", W, H, FPS, frames, n, nxt.get("solo", False))
+    return ["-ss", f"{nxt['src_t'] - lead:.3f}", "-t", f"{lead + 0.5:.3f}", "-i", nxt["src"]] + more, graph
+
+
+def hearts_bg(W, H, t0, hd, last, tag):
+    """What is behind the falling hearts: the TV colour bars cut in when the hearts start (at t0), then fade
+    to black and stay black until the hearts are done. Returns the filter text; its result is [bg<tag>]."""
+    return (f";smptebars=s={W}x{2 * int(H * 0.75)}:r={FPS}:d={hd + 0.5:.3f},crop={W}:{H}:0:0,"
+            f"trim=end_frame={round(hd * FPS)},fade=t=out:st=0.25:d={0.55 * hd:.3f},format=yuva420p,"
+            f"fade=t=in:st=0:d=0.15:alpha=1,setpts=PTS+{t0:.3f}/TB[bars{tag}];"
+            f"[{last}][bars{tag}]overlay=eof_action=pass[bg{tag}]")
+
+
 def render(segs, song, start, length, out, wide, logo=None, card=None, card_d=0.0):
     W, H = (1920, 1080) if wide else (1080, 1920)
     tmp = Path(tempfile.mkdtemp(prefix="mashup_"))
@@ -701,9 +747,17 @@ def render(segs, song, start, length, out, wide, logo=None, card=None, card_d=0.
         vf += ",format=yuv420p"
         part = tmp / f"seg_{k:03d}.mp4"
         how = ["-ss", f"{s['src_t']:.3f}", "-t", f"{s['src_d'] + 0.5:.3f}", "-i", s["src"]]
-        if k + 1 < len(segs) and segs[k + 1].get("pip"):   # next shot previews in a box, then fills the frame
+        if k + 1 < len(segs) and segs[k + 1].get("bullet"):   # a bullet crosses and the next shot follows it in
+            more, graph = bullet_filter(segs[k + 1], W, H, wide, s["frames"])
+            how += more + ["-filter_complex", f"[0:v]{vf}[m];{graph}", "-map", "[v]"]
+        elif k + 1 < len(segs) and segs[k + 1].get("pip"):   # next shot previews in a box, then fills the frame
             more, graph = pip_filter(segs[k + 1], W, H, wide, s["frames"])
             how += more + ["-filter_complex", f"[0:v]{vf}[m];{graph}", "-map", "[v]"]
+        elif s.get("bullet_in"):   # the bullet sequence opens this clip, starting on the cut
+            n_in = max(4, min(round(s["bullet_in"] * FPS), s["frames"] - 2))
+            more, graph = bullet.graph("null", W, H, FPS, s["frames"], n_in, s.get("solo", False), lead_in=True)
+            how += (["-f", "lavfi", "-i", "color=black:s=16x16:r=30:d=0.1"] + more
+                    + ["-filter_complex", f"[0:v]{vf}[m];{graph}", "-map", "[v]"])
         else:
             how += ["-vf", vf]
         r = run([FF, "-y", "-v", "error", *how, "-an", "-frames:v", s["frames"], "-c:v", "libx264",
@@ -739,8 +793,31 @@ def render(segs, song, start, length, out, wide, logo=None, card=None, card_d=0.
                f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={FPS},format=yuv420p[card];"
                f"[{last}]setsar=1,format=yuv420p[body];[body][card]concat=n=2:v=1:a=0[joined]")
         last = "joined"
+    fade_out = 1.0   # seconds the picture takes to fade to black at the very end
+    if HEARTS > 0:   # small hearts fall like petals and cover the screen while it fades to black
+        hd = min(HEARTS, max(1.0, total - 1.0))
+        petals.make(W, H, FPS, hd, tmp / "hearts.mov", FF)
+        extra += ["-i", tmp / "hearts.mov"]
+        if HEARTS_BG == "bars":
+            fc, last = fc + hearts_bg(W, H, total - hd, hd, last, "e"), "bge"
+        fc += (f";[{2 + bool(logo) + bool(card)}:v]setpts=PTS+{total - hd:.3f}/TB[hearts];"
+               f"[{last}][hearts]overlay=eof_action=pass[hrt]")
+        last, fade_out = "hrt", (0.5 if HEARTS_BG == "bars" else min(2.0, 0.55 * hd))
+    if HEARTS_MID > 0:   # the same hearts mid-video: they cover the screen, it dips to black, the next shot fades in
+        hd = min(HEARTS_LEN, max(1.0, HEARTS_MID - 0.2))
+        dip = 0.25 if HEARTS_BG == "bars" else min(2.0, 0.55 * hd)
+        petals.make(W, H, FPS, hd, tmp / "hearts_mid.mov", FF)
+        extra += ["-i", tmp / "hearts_mid.mov"]
+        if HEARTS_BG == "bars":
+            fc, last = fc + hearts_bg(W, H, HEARTS_MID - hd, hd, last, "m"), "bgm"
+        fc += (f";[{2 + bool(logo) + bool(card) + (HEARTS > 0)}:v]setpts=PTS+{HEARTS_MID - hd:.3f}/TB[hmid];"
+               f"[{last}][hmid]overlay=eof_action=pass[hm1];"
+               f"color=black:s={W}x{H}:r={FPS}:d={dip + 0.35:.3f},format=yuva420p,fade=t=in:st=0:d={dip:.3f}:alpha=1,"
+               f"fade=t=out:st={dip:.3f}:d=0.30:alpha=1,setpts=PTS+{HEARTS_MID - dip:.3f}/TB[dip];"
+               f"[hm1][dip]overlay=eof_action=pass[hm2]")
+        last = "hm2"
     fades = f"afade=t=in:st=0:d=0.3,afade=t=out:st={total - 1.5:.2f}:d=1.5"
-    fc += (f";[{last}]fade=t=out:st={total - 1:.2f}:d=1[v];"
+    fc += (f";[{last}]fade=t=out:st={total - fade_out:.2f}:d={fade_out:.2f}[v];"
            f"[1:a]{fades},{loudness_filter(song, start, total, fades)},"
            f"alimiter=limit=0.84:attack=3:release=60:level=0[a]")
     r = run([FF, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst,
@@ -832,8 +909,19 @@ def main():
     ap.add_argument("--pip-time", type=float, default=0.6)
     ap.add_argument("--pip-size", type=float, default=0.3)
     ap.add_argument("--pip-every", type=int, default=4)
+    ap.add_argument("--pip-at", type=float, action="append", default=[])
+    ap.add_argument("--pip-first", type=int, default=None)
     ap.add_argument("--pip-corner", default="", choices=["", "qtl", "qtr", "qbl", "qbr", "tl", "tr", "bl", "br"])
     ap.add_argument("--pip-bars", type=float, default=0.13)
+    ap.add_argument("--hearts", action="store_true")
+    ap.add_argument("--hearts-time", type=float, default=3.0)
+    ap.add_argument("--hearts-at", type=float, default=None)
+    ap.add_argument("--bullet", action="store_true")
+    ap.add_argument("--bullet-every", type=int, default=4)
+    ap.add_argument("--bullet-at", type=float, action="append", default=[])
+    ap.add_argument("--bullet-from", type=float, action="append", default=[])
+    ap.add_argument("--bullet-time", type=float, default=0.9)
+    ap.add_argument("--bullet-solo", action="store_true")
     a = ap.parse_args()
     for spec in a.skip:   # --skip name.mp4:40-50
         name, _, rng = spec.rpartition(":")
@@ -841,11 +929,13 @@ def main():
         if not name or not t1:
             sys.exit(f"--skip should look like video.mp4:40-50, got: {spec}")
         SKIP.append((name, float(t0), float(t1)))
-    global FPS, MATCH, ZOOM, FADE, PACE, MAXSHOT, DARK, GRADE, STACK, TEXT, SPREAD, HIT_EASE, RAMP, PIP, PIP_SIZE, PIP_CORNER, PIP_BARS
+    global FPS, MATCH, ZOOM, FADE, PACE, MAXSHOT, DARK, GRADE, STACK, TEXT, SPREAD, HIT_EASE, RAMP, PIP, PIP_SIZE, PIP_CORNER, PIP_BARS, HEARTS, HEARTS_MID, HEARTS_LEN
     HIT_EASE, RAMP = a.hit_ease, max(0.0, min(0.8, a.ramp))
-    PIP = max(0.3, min(3.0, a.pip_time)) if a.pip else 0.0
+    PIP = max(0.3, min(3.0, a.pip_time)) if a.pip or a.pip_at else 0.0
     PIP_SIZE, PIP_CORNER = max(0.15, min(0.6, a.pip_size)), a.pip_corner
     PIP_BARS = max(0.0, min(0.5, a.pip_bars))
+    HEARTS = max(1.0, min(8.0, a.hearts_time)) if a.hearts else 0.0
+    HEARTS_LEN = max(1.0, min(8.0, a.hearts_time))
     if a.endcard and not Path(a.endcard).exists():
         sys.exit(f"not found: {a.endcard}")
     card_d = card_length(a.endcard, a.endcard_seconds)
@@ -938,16 +1028,36 @@ def main():
             if k and s["act"] == "explosion":   # explosions always get the white flash and a bigger hit
                 s["tin"], s["punch"] = "flash", 0.14
     if PIP:   # about every Nth cut, where the shot before it is long enough to show a preview
-        since, n_pip = 0, 0
+        since, n_pip = max(1, a.pip_every) - max(1, a.pip_first or a.pip_every), 0   # --pip-first: cut that gets the first one
+        forced = set()   # --pip-at: the cut nearest each of those seconds always gets it
+        for t in (a.pip_at if len(segs) > 1 else []):
+            near = min(range(1, len(segs)), key=lambda j: abs(segs[j]["t0"] - t))
+            forced.add(near)
+            print(f"--pip-at {t:g}: using the cut at {segs[near]['t0']:.2f}s")
         for k in range(1, len(segs)):
             since += 1
             before = segs[k - 1]["frames"] / FPS
-            if since >= max(1, a.pip_every) and before >= 0.9 and segs[k]["act"] != "explosion":
+            auto = a.pip and since >= max(1, a.pip_every) and before >= 0.9 and segs[k]["act"] != "explosion"
+            if k in forced and before < 0.5:
+                print(f"  the shot before {segs[k]['t0']:.2f}s is too short for a preview box, skipped")
+            if auto or (k in forced and before >= 0.5):
                 segs[k]["pip"] = min(PIP, 0.55 * before)
                 segs[k]["tin"], segs[k]["punch"] = "cut", 0.0   # the growing box is the transition
                 since, n_pip = 0, n_pip + 1
         print(f"picture-in-picture on {n_pip} of {len(segs) - 1} cuts"
               + ("" if n_pip else " (no shot is long enough: try --pace 1 or a smaller --clips)"))
+    if a.bullet or a.bullet_at:
+        bullet.choose(segs, FPS, a.bullet, a.bullet_every, a.bullet_at,
+                      max(0.5, min(2.5, a.bullet_time)), a.bullet_solo)
+    if a.bullet_from:   # the bullet sequence starts on these cuts
+        bullet.choose_from(segs, FPS, a.bullet_from, max(0.5, min(2.5, a.bullet_time)), a.bullet_solo)
+    if a.hearts_at is not None and len(segs) > 1:   # hearts in the middle: they finish on the cut nearest that second
+        k = min(range(1, len(segs)), key=lambda j: abs(segs[j]["t0"] - a.hearts_at))
+        HEARTS_MID = round(segs[k]["t0"] * FPS) / FPS
+        for key in ("pip", "bullet", "bullet_in"):      # no other transition on that cut
+            segs[k].pop(key, None)
+        segs[k]["tin"], segs[k]["punch"] = "cut", 0.0
+        print(f"--hearts-at {a.hearts_at:g}: the hearts finish on the cut at {HEARTS_MID:.2f}s")
     out0, made, failed = out, [], []
     tries = a.tries or (6 if a.versions > 1 else 1)
     for ver in range(max(1, a.versions)):
@@ -987,7 +1097,7 @@ def main():
                 best = (total, [dict(x) for x in segs])
         for x, b in zip(segs, best[1]):
             x.update(b)
-        if PIP:
+        if PIP or a.bullet or a.bullet_at:
             pip_room(segs, picker, not fixed)
         picker.block(segs)                       # the next version must use different footage
         if a.versions > 1:

@@ -300,3 +300,18 @@ Only use footage and music you have the rights to.
 |---|---|
 | `--landscape 3` | number of city / scenery shots, spread evenly through the calm parts (videos scored before this switch existed must be rescored) |
 | `--edit FILE.edit.txt` | render a saved edit list exactly: its clips, in the order of its lines |
+
+### Transitions and extras
+`bullet.py` and `petals.py` must sit in the same folder as `mashup.py`. Their pictures are drawn on first use into `art/`.
+
+| Switch | What it does |
+|---|---|
+| `--pip-first 1` | which cut gets the first picture-in-picture |
+| `--pip-at 12` | picture-in-picture on the cut nearest that second (repeatable) |
+| `--bullet-at 6.5` | bullet transition that ends on the cut nearest that second (repeatable) |
+| `--bullet-from 4` | bullet transition that starts on the cut nearest that second (repeatable) |
+| `--bullet --bullet-every 4` | bullet transition on about every 4th cut |
+| `--bullet-time 0.9` | seconds the bullet sequence takes |
+| `--bullet-solo` | bullet flies across with no heart |
+| `--hearts-at 15` | small hearts fall and cover the screen mid-video, finishing on the cut nearest that second |
+| `--hearts --hearts-time 3` | small hearts fall over the last seconds of the video |
