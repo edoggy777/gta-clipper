@@ -316,3 +316,8 @@ Only use footage and music you have the rights to.
 | `--hearts-at 15` | small hearts fall and cover the screen mid-video, finishing on the cut nearest that second |
 | `--hearts --hearts-time 3` | small hearts fall over the last seconds of the video |
 | `--planes 3` | number of airplane shots |
+| `--glitch-at 8` | glitch (picture tears in bands, colours split, static) that starts on the cut nearest that second (repeatable) |
+| `--glitch-image logo.png` | picture that flickers in over the video during the glitch and tears with it |
+| `--glitch-time 0.5` | seconds the glitch lasts |
+| `--glitch-hold 1` | seconds the picture stays, steady, after the glitch (default 0) |
+| `--glitch-size 0.6` | width of the picture, as a share of the frame |

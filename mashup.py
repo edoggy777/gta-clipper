@@ -71,6 +71,11 @@ HEARTS = 0.0     # set by --hearts: seconds of small hearts falling over the end
 HEARTS_BG = "bars"   # behind the falling hearts: "bars" = TV colour bars that fade to black, "video" = the video itself
 HEARTS_MID = 0.0  # set by --hearts-at: the cut (in seconds) that falling hearts in the middle finish on (0 = off)
 HEARTS_LEN = 3.0  # set by --hearts-time: how long the hearts fall
+GLITCH = []       # set by --glitch-at: the cuts (in seconds) a glitch starts on
+GLITCH_IMG = None   # set by --glitch-image: picture that flickers in during the glitch
+GLITCH_LEN = 0.5    # set by --glitch-time: seconds a glitch lasts
+GLITCH_HOLD = 0.0   # set by --glitch-hold: seconds the picture stays, steady, after the glitch
+GLITCH_SIZE = 0.6   # set by --glitch-size: width of the picture, as a share of the frame
 _SIZE = {}
 
 
@@ -713,6 +718,35 @@ def hearts_bg(W, H, t0, hd, last, tag):
             f"[{last}][bars{tag}]overlay=eof_action=pass[bg{tag}]")
 
 
+def glitch_filter(W, H, last, idx):
+    """Filter text for --glitch-at. Starting on each chosen cut the picture tears sideways in bands, the
+    colours split and static flickers. With --glitch-image that picture (ffmpeg input number idx) flickers
+    in over the video and tears with it. Returns (filter text, name of the result)."""
+    end = 0.5 / FPS
+    on = "+".join(f"between(t,{t:.4f},{t + GLITCH_LEN - end:.4f})" for t in GLITCH)   # 1 while a glitch runs
+    n = f"floor(t*{FPS}+0.5)"                    # frame number
+    step = f"floor({n}/2)"                       # changes every 2 frames, so each tear can be seen
+    fc = ""
+    if GLITCH_IMG:
+        show = "+".join(f"between(t,{t:.4f},{t + GLITCH_LEN + GLITCH_HOLD - end:.4f})" for t in GLITCH)
+        gone = f"({on})*lt(mod({n}*7,5),2)"      # while glitching the picture drops out 2 frames in 5
+        fc += (f";[{idx}:v]format=rgba,scale={2 * int(W * GLITCH_SIZE / 2)}:-2[gi];"
+               f"[{last}][gi]overlay=x='(W-w)/2+({on})*{W * 0.04:.0f}*sin({n}*2.4)':y='(H-h)/2':"
+               f"enable='({show})*(1-{gone})'[gl0]")
+        last = "gl0"
+    for k in range(5):                           # five bands jump to new heights and slide sideways
+        bh = 2 * int(H * (0.025 + 0.02 * k) / 2)
+        y = f"2*floor(mod(abs(sin({step}*12.9898+{k}*78.233))*43758.5453,1)*{(H - bh) // 2})"
+        dx = f"{W * 0.10:.0f}*sin({step}*{1.7 + k:.1f}+{k})"
+        fc += (f";[{last}]split[ga{k}][gb{k}];[gb{k}]crop={W}:{bh}:0:'{y}'[gc{k}];"
+               f"[ga{k}][gc{k}]overlay=x='{dx}':y='{y}':enable='{on}'[gl{k + 1}]")
+        last = f"gl{k + 1}"
+    shift = max(2, round(W * 0.006))
+    fc += (f";[{last}]chromashift=cbh={-shift}:crh={shift}:enable='{on}',"     # colours split apart
+           f"noise=alls=28:allf=t:enable='{on}'[glx]")                         # static
+    return fc, "glx"
+
+
 def render(segs, song, start, length, out, wide, logo=None, card=None, card_d=0.0):
     W, H = (1920, 1080) if wide else (1080, 1920)
     tmp = Path(tempfile.mkdtemp(prefix="mashup_"))
@@ -817,6 +851,12 @@ def render(segs, song, start, length, out, wide, logo=None, card=None, card_d=0.
                f"fade=t=out:st={dip:.3f}:d=0.30:alpha=1,setpts=PTS+{HEARTS_MID - dip:.3f}/TB[dip];"
                f"[hm1][dip]overlay=eof_action=pass[hm2]")
         last = "hm2"
+    if GLITCH:   # glitch that starts on the chosen cuts (it goes over everything above)
+        idx = 2 + bool(logo) + bool(card) + (HEARTS > 0) + (HEARTS_MID > 0)
+        if GLITCH_IMG:
+            extra += ["-i", GLITCH_IMG]
+        more, last = glitch_filter(W, H, last, idx)
+        fc += more
     fades = f"afade=t=in:st=0:d=0.3,afade=t=out:st={total - 1.5:.2f}:d=1.5"
     fc += (f";[{last}]fade=t=out:st={total - fade_out:.2f}:d={fade_out:.2f}[v];"
            f"[1:a]{fades},{loudness_filter(song, start, total, fades)},"
@@ -918,6 +958,11 @@ def main():
     ap.add_argument("--hearts", action="store_true")
     ap.add_argument("--hearts-time", type=float, default=3.0)
     ap.add_argument("--hearts-at", type=float, default=None)
+    ap.add_argument("--glitch-at", type=float, action="append", default=[])
+    ap.add_argument("--glitch-image", default=None)
+    ap.add_argument("--glitch-time", type=float, default=0.5)
+    ap.add_argument("--glitch-hold", type=float, default=0.0)
+    ap.add_argument("--glitch-size", type=float, default=0.6)
     ap.add_argument("--bullet", action="store_true")
     ap.add_argument("--bullet-every", type=int, default=4)
     ap.add_argument("--bullet-at", type=float, action="append", default=[])
@@ -931,7 +976,7 @@ def main():
         if not name or not t1:
             sys.exit(f"--skip should look like video.mp4:40-50, got: {spec}")
         SKIP.append((name, float(t0), float(t1)))
-    global FPS, MATCH, ZOOM, FADE, PACE, MAXSHOT, DARK, GRADE, STACK, TEXT, SPREAD, HIT_EASE, RAMP, PIP, PIP_SIZE, PIP_CORNER, PIP_BARS, HEARTS, HEARTS_MID, HEARTS_LEN
+    global FPS, MATCH, ZOOM, FADE, PACE, MAXSHOT, DARK, GRADE, STACK, TEXT, SPREAD, HIT_EASE, RAMP, PIP, PIP_SIZE, PIP_CORNER, PIP_BARS, HEARTS, HEARTS_MID, HEARTS_LEN, GLITCH_IMG, GLITCH_LEN, GLITCH_HOLD, GLITCH_SIZE
     HIT_EASE, RAMP = a.hit_ease, max(0.0, min(0.8, a.ramp))
     PIP = max(0.3, min(3.0, a.pip_time)) if a.pip or a.pip_at else 0.0
     PIP_SIZE, PIP_CORNER = max(0.15, min(0.6, a.pip_size)), a.pip_corner
@@ -1062,6 +1107,20 @@ def main():
             segs[k].pop(key, None)
         segs[k]["tin"], segs[k]["punch"] = "cut", 0.0
         print(f"--hearts-at {a.hearts_at:g}: the hearts finish on the cut at {HEARTS_MID:.2f}s")
+    if a.glitch_image and not Path(a.glitch_image).exists():
+        sys.exit(f"not found: {a.glitch_image}")
+    if a.glitch_image and not a.glitch_at:
+        sys.exit("--glitch-image needs --glitch-at SECONDS to say where the glitch goes")
+    GLITCH_IMG = str(Path(a.glitch_image).resolve()) if a.glitch_image else None
+    GLITCH_LEN = max(0.1, min(3.0, a.glitch_time))
+    GLITCH_HOLD = max(0.0, min(10.0, a.glitch_hold))
+    GLITCH_SIZE = max(0.1, min(1.0, a.glitch_size))
+    for t in a.glitch_at:   # the glitch starts on the cut nearest each of those seconds
+        k = min(range(len(segs)), key=lambda j: abs(segs[j]["t0"] - t))
+        at = round(segs[k]["t0"] * FPS) / FPS
+        if at not in GLITCH:
+            GLITCH.append(at)
+        print(f"--glitch-at {t:g}: the glitch starts on the cut at {at:.2f}s")
     out0, made, failed = out, [], []
     tries = a.tries or (6 if a.versions > 1 else 1)
     for ver in range(max(1, a.versions)):
