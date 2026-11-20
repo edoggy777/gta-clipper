@@ -52,8 +52,10 @@ Scoring is slow the first time. The results are cached in a
 | `explosion` | Hardest hits | Explosions |
 | `guns` | Chase slots, with `--guns` | Gunfights |
 | `drugs` | Chase slots, with `--drugs` | Drug scenes |
+| `airplane` | Chase slots, with `--planes` | Planes and jets |
 | `boat` | Chase slots, with `--boats` | Boats, jet skis, ships |
 | `emotional` | Quiet parts, with `--emotional` | Close-ups, quiet dramatic moments |
+| `landscape` | Quiet parts, with `--landscape` | City skyline, scenery, wide views |
 | `scuba` | Quiet parts, with `--scuba` | Scuba diving / underwater shots |
 | `cutscene` | Quiet breaks | Calm shots |
 | `falling` | After the last loud part | Calm shots |
@@ -77,8 +79,10 @@ Videos go at the end with no option name. Use as many as you like.
 | `--explosions N` | Exactly N explosion shots, spread evenly | automatic |
 | `--guns N` | N gunfight shots, spread evenly | none |
 | `--drugs N` | N drug-scene shots, spread evenly | none |
+| `--planes N` | N airplane shots, spread evenly | none |
 | `--boats N` | N boat shots, spread evenly | none |
 | `--emotional N` | N emotional shots in the quiet parts | none |
+| `--landscape N` | N city / scenery shots in the quiet parts | none |
 | `--scuba N` | N scuba diving shots in the quiet parts | none |
 | `--chase N` | Exactly N chase shots | automatic |
 | `--speed N` | Speed of chase, explosion and guns shots | 1.0 |
@@ -88,7 +92,8 @@ Videos go at the end with no option name. Use as many as you like.
 
 ### Order of placement
 
-Explosions are placed first, then emotional, guns and drugs shots.
+Explosions are placed first, then the other shot types you ask for
+(emotional, landscape, guns, drugs, planes and so on).
 `--chase` runs last and only adjusts the slots that are left. A 60-second
 video has roughly 20 to 30 slots depending on the song's tempo, so the
 numbers you ask for have to fit.
