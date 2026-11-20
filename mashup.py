@@ -297,6 +297,20 @@ def scatter_landscape(segs, length, n):
         free.remove(k)
 
 
+def scatter_scuba(segs, length, n):
+    """n scuba / underwater shots, spread evenly, taken from the quiet slots first."""
+    free = [j for j in range(1, len(segs)) if segs[j]["act"] in ("cutscene", "falling", "rising")]
+    if len(free) < n:
+        free += [j for j in range(1, len(segs)) if segs[j]["act"] == "chase"]
+    for i in range(n):
+        if not free:
+            break
+        target = (i + 0.75) / n * length
+        k = min(free, key=lambda j: abs((segs[j]["t0"] + segs[j]["t1"]) / 2 - target))
+        segs[k]["act"] = "scuba"
+        free.remove(k)
+
+
 SKIP = []   # (video name, from second, to second) that must never be used
 
 
@@ -481,6 +495,8 @@ class Picker:
         "emotional": [({"emotional"}, True), ({"other"}, True), ({"chase"}, False), (None, False)],
         "landscape": [({"landscape"}, True), ({"other"}, True), ({"emotional"}, True), (None, False)],
         "airplane": [({"airplane"}, True), ({"landscape"}, True), ({"other"}, True), (None, False)],
+        "scuba": [({"scuba"}, True), ({"landscape"}, True), ({"other"}, True), (None, False)],
+        "boat": [({"boat"}, True), ({"chase"}, True), ({"landscape"}, True), ({"other"}, True), (None, False)],
         "falling": [({"other"}, True), (None, False)],
     }
 
@@ -919,6 +935,8 @@ def main():
     ap.add_argument("--guns", type=int, default=None)
     ap.add_argument("--drugs", type=int, default=None)
     ap.add_argument("--planes", type=int, default=None)
+    ap.add_argument("--scuba", type=int, default=None)
+    ap.add_argument("--boats", type=int, default=None)
     ap.add_argument("--speed", type=float, default=1.0)
     ap.add_argument("--zoom", action="store_true")
     ap.add_argument("--zoom-amount", type=float, default=0.04)
@@ -1022,12 +1040,16 @@ def main():
         scatter_emotional(segs, length, a.emotional)
     if a.landscape:
         scatter_landscape(segs, length, a.landscape)
+    if a.scuba:
+        scatter_scuba(segs, length, a.scuba)
     if a.guns:
         scatter_act(segs, length, a.guns, "guns", 0.25)
     if a.drugs:
         scatter_act(segs, length, a.drugs, "drugs", 0.75)
     if a.planes:
         scatter_act(segs, length, a.planes, "airplane", 0.5)
+    if a.boats:
+        scatter_act(segs, length, a.boats, "boat", 0.6)
     if a.chase is not None:
         set_chases(segs, length, a.chase)
     print("footage:")
@@ -1148,7 +1170,7 @@ def main():
                     segs[k]["only"] = q
                     open_slots.remove(k)
             seen = {}
-            for act in ("explosion", "airplane", "emotional", "landscape", "guns", "drugs", "chase", "intro", "rising", "cutscene", "falling"):  # best footage first
+            for act in ("explosion", "airplane", "scuba", "boat", "emotional", "landscape", "guns", "drugs", "chase", "intro", "rising", "cutscene", "falling"):  # best footage first
                 for s in segs:
                     if s["act"] == act:
                         frac = seen.get(act, 0) / counts[act]

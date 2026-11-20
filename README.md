@@ -40,7 +40,7 @@ Scoring is slow the first time. The results are cached in a
 
 ### Footage labels
 
-`explosion`, `guns`, `drugs`, `violence`, `chase`, `emotional`, `other`
+`explosion`, `guns`, `drugs`, `violence`, `chase`, `emotional`, `landscape`, `airplane`, `scuba`, `boat`, `other`
 
 ### Slot roles
 
@@ -52,7 +52,9 @@ Scoring is slow the first time. The results are cached in a
 | `explosion` | Hardest hits | Explosions |
 | `guns` | Chase slots, with `--guns` | Gunfights |
 | `drugs` | Chase slots, with `--drugs` | Drug scenes |
+| `boat` | Chase slots, with `--boats` | Boats, jet skis, ships |
 | `emotional` | Quiet parts, with `--emotional` | Close-ups, quiet dramatic moments |
+| `scuba` | Quiet parts, with `--scuba` | Scuba diving / underwater shots |
 | `cutscene` | Quiet breaks | Calm shots |
 | `falling` | After the last loud part | Calm shots |
 
@@ -75,7 +77,9 @@ Videos go at the end with no option name. Use as many as you like.
 | `--explosions N` | Exactly N explosion shots, spread evenly | automatic |
 | `--guns N` | N gunfight shots, spread evenly | none |
 | `--drugs N` | N drug-scene shots, spread evenly | none |
+| `--boats N` | N boat shots, spread evenly | none |
 | `--emotional N` | N emotional shots in the quiet parts | none |
+| `--scuba N` | N scuba diving shots in the quiet parts | none |
 | `--chase N` | Exactly N chase shots | automatic |
 | `--speed N` | Speed of chase, explosion and guns shots | 1.0 |
 | `--sync` | Speed follows the music (see below) | off |
@@ -316,6 +320,8 @@ Only use footage and music you have the rights to.
 | `--hearts-at 15` | small hearts fall and cover the screen mid-video, finishing on the cut nearest that second |
 | `--hearts --hearts-time 3` | small hearts fall over the last seconds of the video |
 | `--planes 3` | number of airplane shots |
+| `--boats 3` | number of boat shots (speedboats, yachts, jet skis, ships). Videos scored before this label existed need scoring again: delete their `.scores.txt` file |
+| `--scuba 3` | number of scuba diving (underwater) shots, in the quiet parts. Videos scored before this label existed need scoring again: delete their `.scores.txt` file |
 | `--glitch-at 8` | glitch (picture tears in bands, colours split, static) that starts on the cut nearest that second (repeatable) |
 | `--glitch-image logo.png` | picture that flickers in over the video during the glitch and tears with it |
 | `--glitch-time 0.5` | seconds the glitch lasts |
