@@ -40,7 +40,7 @@ Scoring is slow the first time. The results are cached in a
 
 ### Footage labels
 
-`explosion`, `guns`, `drugs`, `violence`, `chase`, `emotional`, `landscape`, `airplane`, `scuba`, `boat`, `other`
+`explosion`, `guns`, `drugs`, `violence`, `chase`, `emotional`, `landscape`, `airplane`, `scuba`, `boat`, `biker`, `other`
 
 ### Slot roles
 
@@ -54,6 +54,7 @@ Scoring is slow the first time. The results are cached in a
 | `drugs` | Chase slots, with `--drugs` | Drug scenes |
 | `airplane` | Chase slots, with `--planes` | Planes and jets |
 | `boat` | Chase slots, with `--boats` | Boats, jet skis, ships |
+| `biker` | Chase slots, with `--bikers` | Motorcycles, biker gangs |
 | `emotional` | Quiet parts, with `--emotional` | Close-ups, quiet dramatic moments |
 | `landscape` | Quiet parts, with `--landscape` | City skyline, scenery, wide views |
 | `scuba` | Quiet parts, with `--scuba` | Scuba diving / underwater shots |
@@ -81,6 +82,7 @@ Videos go at the end with no option name. Use as many as you like.
 | `--drugs N` | N drug-scene shots, spread evenly | none |
 | `--planes N` | N airplane shots, spread evenly | none |
 | `--boats N` | N boat shots, spread evenly | none |
+| `--bikers N` | N biker / motorcycle shots, spread evenly | none |
 | `--emotional N` | N emotional shots in the quiet parts | none |
 | `--landscape N` | N city / scenery shots in the quiet parts | none |
 | `--scuba N` | N scuba diving shots in the quiet parts | none |
@@ -325,6 +327,7 @@ Only use footage and music you have the rights to.
 | `--hearts-at 15` | small hearts fall and cover the screen mid-video, finishing on the cut nearest that second |
 | `--hearts --hearts-time 3` | small hearts fall over the last seconds of the video |
 | `--planes 3` | number of airplane shots |
+| `--bikers 3` | number of biker shots (motorcycles, biker gangs). Videos scored before this label existed need scoring again: delete their `.scores.txt` file |
 | `--boats 3` | number of boat shots (speedboats, yachts, jet skis, ships). Videos scored before this label existed need scoring again: delete their `.scores.txt` file |
 | `--scuba 3` | number of scuba diving (underwater) shots, in the quiet parts. Videos scored before this label existed need scoring again: delete their `.scores.txt` file |
 | `--glitch-at 8` | glitch (picture tears in bands, colours split, static) that starts on the cut nearest that second (repeatable) |
