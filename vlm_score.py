@@ -11,9 +11,9 @@ model = AutoModelForImageTextToText.from_pretrained(MODEL, device_map="cuda",
                                            bnb_4bit_compute_dtype=torch.bfloat16))
 proc = AutoProcessor.from_pretrained(MODEL)
 
-Q = ("This is a frame from GTA. Classify it with ONE label from: explosion, guns, drugs, violence, chase, emotional, landscape, airplane, scuba, boat, biker, other. "
-     "guns=weapons drawn or shooting; drugs=drug use, dealing, labs, pills, bags; explosion=fireball, blast, vehicle or building blowing up, big flames or smoke cloud; emotional=close-up of a sad, crying, hugging or thoughtful character, quiet dramatic moment; landscape=city skyline, streets, buildings, beach, mountains, sunset or other scenery shown as a wide view with no fighting, shooting or chase; violence=fights, blood, WASTED screen; "
-     "chase=police pursuit, wanted stars, high-speed driving, crashes; airplane=a plane or jet (not a helicopter) flying, taking off, landing or parked, seen from outside or from its cockpit; scuba=underwater view: a diver in scuba gear, swimming below the surface, sea floor, reef, fish, sharks or a submarine; boat=a boat, speedboat, yacht, jet ski or ship on the water, seen from outside or from on board (not underwater); biker=motorcycles and biker gangs: someone riding a motorcycle or chopper, a group of bikers riding together, bikers in leather vests, parked motorcycles, a biker clubhouse (use biker instead of chase whenever a motorcycle is the main subject); other=calm driving, walking, menus, cutscenes, scenery. "
+Q = ("This is a frame from GTA. Classify it with ONE label from: explosion, dancing, guns, drugs, violence, chase, emotional, landscape, airplane, scuba, boat, biker, police, fight, other. "
+     "guns=weapons drawn or shooting; drugs=drug use, dealing, labs, pills, bags; explosion=fireball, blast, vehicle or building blowing up, big flames or smoke cloud; emotional=close-up of a sad, crying, hugging or thoughtful character, quiet dramatic moment; landscape=city skyline, streets, buildings, beach, mountains, sunset or other scenery shown as a wide view with no fighting, shooting or chase; violence=blood, injured or dead bodies, WASTED screen (no fight going on); "
+     "chase=police pursuit, wanted stars, high-speed driving, crashes; airplane=a plane or jet (not a helicopter) flying, taking off, landing or parked, seen from outside or from its cockpit; scuba=underwater view: a diver in scuba gear, swimming below the surface, sea floor, reef, fish, sharks or a submarine; boat=a boat, speedboat, yacht, jet ski or ship on the water, seen from outside or from on board (not underwater); biker=motorcycles and biker gangs: someone riding a motorcycle or chopper, a group of bikers riding together, bikers in leather vests, parked motorcycles, a biker clubhouse (use biker instead of chase whenever a motorcycle is the main subject); dancing=people dancing in a nightclub, bar, strip club or party: dance floor, crowd dancing, a DJ, club lights and lasers, a character doing a dance move; police=police are the main subject: police cars or police motorcycles with lights flashing, officers on foot, a police helicopter, a roadblock, SWAT, an arrest or a police station (use police instead of chase whenever police are clearly visible in the frame); fight=hand-to-hand fighting: punching, kicking, wrestling, a brawl, or a melee fight with fists, bats or knives (use guns instead when a gun is being aimed or fired); other=calm driving, walking, menus, cutscenes, scenery. "
      "Then rate 0-10 how intense/clip-worthy it is. Reply exactly as: LABEL SCORE")
 
 cap = cv2.VideoCapture(sys.argv[1]); fps = cap.get(cv2.CAP_PROP_FPS)
@@ -28,7 +28,7 @@ while True:
     inputs = proc(text=[text], images=[img], return_tensors="pt").to("cuda")
     out = model.generate(**inputs, max_new_tokens=8)
     ans = proc.batch_decode(out[:, inputs.input_ids.shape[1]:], skip_special_tokens=True)[0]
-    m = re.search(r"(airplane|scuba|boat|biker|explosion|guns|drugs|violence|chase|emotional|landscape|other)\D*(\d+)", ans.lower())
+    m = re.search(r"(fight|dancing|airplane|scuba|boat|biker|police|explosion|guns|drugs|violence|chase|emotional|landscape|other)\D*(\d+)", ans.lower())
     label, score = (m.group(1), int(m.group(2))) if m else ("other", 0)
     print(t, score, label, flush=True)
     t += STEP

@@ -40,7 +40,7 @@ Scoring is slow the first time. The results are cached in a
 
 ### Footage labels
 
-`explosion`, `guns`, `drugs`, `violence`, `chase`, `emotional`, `landscape`, `airplane`, `scuba`, `boat`, `biker`, `other`
+`explosion`, `guns`, `drugs`, `violence`, `chase`, `emotional`, `landscape`, `airplane`, `scuba`, `boat`, `dancing`, `biker`, `fight`, `other`
 
 ### Slot roles
 
@@ -54,7 +54,10 @@ Scoring is slow the first time. The results are cached in a
 | `drugs` | Chase slots, with `--drugs` | Drug scenes |
 | `airplane` | Chase slots, with `--planes` | Planes and jets |
 | `boat` | Chase slots, with `--boats` | Boats, jet skis, ships |
+| `dancing` | Chase slots, with `--clubdancing` | Nightclub dancing, dance floors, DJs |
 | `biker` | Chase slots, with `--bikers` | Motorcycles, biker gangs |
+| `fight` | Chase slots, with `--fights` | Fist fights, brawls, melee |
+| `police` | Chase slots, with `--police` | Police cars, officers, helicopters, roadblocks |
 | `emotional` | Quiet parts, with `--emotional` | Close-ups, quiet dramatic moments |
 | `landscape` | Quiet parts, with `--landscape` | City skyline, scenery, wide views |
 | `scuba` | Quiet parts, with `--scuba` | Scuba diving / underwater shots |
@@ -82,7 +85,10 @@ Videos go at the end with no option name. Use as many as you like.
 | `--drugs N` | N drug-scene shots, spread evenly | none |
 | `--planes N` | N airplane shots, spread evenly | none |
 | `--boats N` | N boat shots, spread evenly | none |
+| `--clubdancing N` | N nightclub dancing shots, spread evenly | none |
 | `--bikers N` | N biker / motorcycle shots, spread evenly | none |
+| `--fights N` | N fight shots, spread evenly | none |
+| `--police N` | N police shots, spread evenly | none |
 | `--emotional N` | N emotional shots in the quiet parts | none |
 | `--landscape N` | N city / scenery shots in the quiet parts | none |
 | `--scuba N` | N scuba diving shots in the quiet parts | none |
@@ -327,7 +333,10 @@ Only use footage and music you have the rights to.
 | `--hearts-at 15` | small hearts fall and cover the screen mid-video, finishing on the cut nearest that second |
 | `--hearts --hearts-time 3` | small hearts fall over the last seconds of the video |
 | `--planes 3` | number of airplane shots |
+| `--police 3` | number of police shots (police cars, officers, helicopters, roadblocks). Videos scored before this label existed need scoring again: delete their `.scores.txt` file |
+| `--fights 3` | number of fight shots (fist fights, brawls, melee). Videos scored before this label existed need scoring again: delete their `.scores.txt` file |
 | `--bikers 3` | number of biker shots (motorcycles, biker gangs). Videos scored before this label existed need scoring again: delete their `.scores.txt` file |
+| `--clubdancing 3` | number of nightclub dancing shots (dance floors, DJs, club lights). Videos scored before this label existed need scoring again: delete their `.scores.txt` file |
 | `--boats 3` | number of boat shots (speedboats, yachts, jet skis, ships). Videos scored before this label existed need scoring again: delete their `.scores.txt` file |
 | `--scuba 3` | number of scuba diving (underwater) shots, in the quiet parts. Videos scored before this label existed need scoring again: delete their `.scores.txt` file |
 | `--glitch-at 8` | glitch (picture tears in bands, colours split, static) that starts on the cut nearest that second (repeatable) |
@@ -335,3 +344,12 @@ Only use footage and music you have the rights to.
 | `--glitch-time 0.5` | seconds the glitch lasts |
 | `--glitch-hold 1` | seconds the picture stays, steady, after the glitch (default 0) |
 | `--glitch-size 0.6` | width of the picture, as a share of the frame |
+
+### Cinematic look
+
+| Switch | What it does |
+|---|---|
+| `--cinematic` | film look on the finished video: black bars top and bottom, darker muted colours, deep blacks, glow around lights, darker corners, film grain, and a slow push-in on every clip |
+| `--cinematic-bars 0.10` | height of each black bar as a share of the frame (0 = no bars) |
+
+The strength of each part is set by the numbers in the `CINE` block near the top of `mashup.py`.

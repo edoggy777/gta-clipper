@@ -485,10 +485,10 @@ def match_looks(segs, k):
 class Picker:
     """Hands out source moments for each act, never reusing the same footage."""
     ORDER = {  # act: list of (labels, sort high-to-low?) tried in turn
-        "explosion": [({"explosion"}, True), ({"violence"}, True), ({"guns"}, True), ({"chase"}, True), (None, True)],
-        "guns": [({"guns"}, True), ({"violence"}, True), ({"guns"}, True), ({"chase"}, True), (None, True)],
-        "drugs": [({"drugs"}, True), ({"violence"}, True), ({"guns"}, True), ({"chase"}, True), (None, True)],
-        "chase": [({"chase"}, True), ({"guns"}, True), ({"violence"}, True), (None, True)],
+        "explosion": [({"explosion"}, True), ({"violence", "fight"}, True), ({"guns"}, True), ({"chase"}, True), (None, True)],
+        "guns": [({"guns"}, True), ({"violence", "fight"}, True), ({"guns"}, True), ({"chase"}, True), (None, True)],
+        "drugs": [({"drugs"}, True), ({"violence", "fight"}, True), ({"guns"}, True), ({"chase"}, True), (None, True)],
+        "chase": [({"chase"}, True), ({"police"}, True), ({"guns"}, True), ({"violence", "fight"}, True), (None, True)],
         "intro": [({"other"}, True), (None, False)],
         "rising": [({"chase"}, False), ({"guns"}, False), ({"other"}, True), (None, False)],
         "cutscene": [({"other"}, True), ({"chase"}, False), (None, False)],
@@ -497,7 +497,10 @@ class Picker:
         "airplane": [({"airplane"}, True), ({"landscape"}, True), ({"other"}, True), (None, False)],
         "scuba": [({"scuba"}, True), ({"landscape"}, True), ({"other"}, True), (None, False)],
         "boat": [({"boat"}, True), ({"chase"}, True), ({"landscape"}, True), ({"other"}, True), (None, False)],
+        "dancing": [({"dancing"}, True), ({"other"}, True), ({"emotional"}, True), (None, False)],
         "biker": [({"biker"}, True), ({"chase"}, True), ({"other"}, True), (None, False)],
+        "police": [({"police"}, True), ({"chase"}, True), ({"guns"}, True), (None, True)],
+        "fight": [({"fight"}, True), ({"violence"}, True), ({"guns"}, True), ({"chase"}, True), (None, True)],
         "falling": [({"other"}, True), (None, False)],
     }
 
@@ -620,6 +623,46 @@ def card_length(card, seconds):
         return round(min(8.0, float(probe(card, "format=duration"))), 2)
     except ValueError:
         sys.exit(f"could not read the end card: {card}")
+
+
+# --cinematic: film look put on the finished video. Change the numbers here to taste.
+CINE = {
+    "on": False,
+    "bars": 0.10,      # black bar at top and bottom, as a share of the height (--cinematic-bars, 0 = none)
+    "dark": 0.95,      # brightness of the mid-tones: lower = darker, 1.0 = unchanged
+    "contrast": 1.06,  # higher = punchier
+    "sat": 0.80,       # colour strength: lower = more muted, 1.0 = unchanged
+    "crush": 0.02,     # how much the darkest parts are pushed to pure black (0 = off)
+    "glow": 0.35,      # soft glow around lights and bright areas (0 = off)
+    "tint": 0.05,      # cool shadows / warm highlights (0 = off)
+    "vignette": 7.0,   # darker corners: lower = stronger, 0 = off
+    "grain": 5,        # film grain (0 = off)
+}
+
+
+def cine_filter(W, H):
+    """Filter text for the --cinematic look ("" when it is off). Goes in front of the final fade."""
+    c = CINE
+    if not c["on"]:
+        return ""
+    f = "format=gbrp,"
+    if c["glow"] > 0:   # blur only the bright parts and lay them back over the picture
+        f += (f"split[cna][cnb];[cnb]curves=all='0/0 0.55/0 1/1',gblur=sigma={max(W, H) / 80:.1f}[cng];"
+              f"[cna][cng]blend=all_mode=screen:all_opacity={c['glow']},")
+    k = c["crush"]
+    f += f"curves=all='0/0 {k + 0.06:.3f}/{0.06 - k * 0.6:.3f} 0.5/0.5 1/1',"
+    if c["tint"] > 0:
+        t = c["tint"]
+        f += f"colorbalance=bs={t}:rs={-t / 2}:rh={t}:bh={-t / 2},"
+    f += f"format=yuv420p,eq=gamma={c['dark']}:contrast={c['contrast']}:saturation={c['sat']},"
+    if c["vignette"] > 0:
+        f += f"vignette=PI/{c['vignette']},"
+    if c["grain"] > 0:
+        f += f"noise=alls={c['grain']}:allf=t,"
+    b = int(H * c["bars"] / 2) * 2
+    if b > 0:
+        f += f"drawbox=x=0:y=0:w={W}:h={b}:color=black:t=fill,drawbox=x=0:y={H - b}:w={W}:h={b}:color=black:t=fill,"
+    return f
 
 
 def base_vf(s, W, H, wide, tag=""):
@@ -831,7 +874,7 @@ def render(segs, song, start, length, out, wide, logo=None, card=None, card_d=0.
         cap = (f",drawtext={ff}textfile={tmp / 'text.txt'}:fontsize={int(W * 0.052)}:fontcolor=white:"
                f"borderw=4:bordercolor=black@0.9:shadowx=3:shadowy=3:x=(w-text_w)/2:"
                f"y='h*0.64+{rise}*(1-{land})':alpha='clip((t-{t0})/0.17,0,1)'")
-    fc, last, extra = f"[0:v]fade=t=in:st=0:d=0.4{cap}[main]", "main", []
+    fc, last, extra = f"[0:v]{cine_filter(W, H)}fade=t=in:st=0:d=0.4{cap}[main]", "main", []
     if logo:   # logo in the centre: fades in, holds, then fades out while the video keeps playing
         hold, fade = 2.5, 1.0
         extra += ["-loop", "1", "-t", f"{hold + fade + 0.5}", "-i", logo]
@@ -925,6 +968,8 @@ def main():
     ap.add_argument("--length", type=float, default=60)
     ap.add_argument("--start", type=float, default=None)
     ap.add_argument("--wide", action="store_true")
+    ap.add_argument("--cinematic", action="store_true")
+    ap.add_argument("--cinematic-bars", type=float, default=0.10)
     ap.add_argument("--logo", default=None)
     ap.add_argument("--explosions", type=int, default=None)
     ap.add_argument("--sync", action="store_true")
@@ -938,7 +983,10 @@ def main():
     ap.add_argument("--planes", type=int, default=None)
     ap.add_argument("--scuba", type=int, default=None)
     ap.add_argument("--boats", type=int, default=None)
+    ap.add_argument("--clubdancing", type=int, default=None)
     ap.add_argument("--bikers", type=int, default=None)
+    ap.add_argument("--fights", type=int, default=None)
+    ap.add_argument("--police", type=int, default=None)
     ap.add_argument("--speed", type=float, default=1.0)
     ap.add_argument("--zoom", action="store_true")
     ap.add_argument("--zoom-amount", type=float, default=0.04)
@@ -990,6 +1038,11 @@ def main():
     ap.add_argument("--bullet-time", type=float, default=0.9)
     ap.add_argument("--bullet-solo", action="store_true")
     a = ap.parse_args()
+    if a.cinematic:
+        CINE.update(on=True, bars=max(0.0, min(0.3, a.cinematic_bars)))
+        a.zoom = True
+        if a.pro and not a.sat:
+            a.sat = 1.0
     for spec in a.skip:   # --skip name.mp4:40-50
         name, _, rng = spec.rpartition(":")
         t0, _, t1 = rng.partition("-")
@@ -1052,8 +1105,14 @@ def main():
         scatter_act(segs, length, a.planes, "airplane", 0.5)
     if a.boats:
         scatter_act(segs, length, a.boats, "boat", 0.6)
+    if a.clubdancing:
+        scatter_act(segs, length, a.clubdancing, "dancing", 0.9)
     if a.bikers:
         scatter_act(segs, length, a.bikers, "biker", 0.4)
+    if a.fights:
+        scatter_act(segs, length, a.fights, "fight", 0.35)
+    if a.police:
+        scatter_act(segs, length, a.police, "police", 0.55)
     if a.chase is not None:
         set_chases(segs, length, a.chase)
     print("footage:")
@@ -1174,7 +1233,7 @@ def main():
                     segs[k]["only"] = q
                     open_slots.remove(k)
             seen = {}
-            for act in ("explosion", "airplane", "scuba", "boat", "biker", "emotional", "landscape", "guns", "drugs", "chase", "intro", "rising", "cutscene", "falling"):  # best footage first
+            for act in ("explosion", "fight", "police", "airplane", "scuba", "boat", "dancing", "biker", "emotional", "landscape", "guns", "drugs", "chase", "intro", "rising", "cutscene", "falling"):  # best footage first
                 for s in segs:
                     if s["act"] == act:
                         frac = seen.get(act, 0) / counts[act]
